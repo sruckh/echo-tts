@@ -213,6 +213,33 @@ python -m inference
 python inference_blockwise.py
 ```
 
+## ☁️ Runpod Serverless (handler-based)
+
+The serverless path uses `handler.py` to warm up models and serve requests. Reference voices come from filenames (no base64) located in a mounted directory, and outputs are written as compressed audio and uploaded to S3-compatible storage (e.g., Backblaze B2).
+
+**Key environment variables**
+- `AUDIO_VOICES_DIR` (default `/runpod-volume/echo-tts/audio_voices`): directory containing reference audio files (`.wav/.mp3/.m4a/.ogg/.flac/.webm/.aac/.opus`). Pass `speaker_voice: "<filename>"` in requests.
+- `OUTPUT_AUDIO_DIR` (default `/runpod-volume/echo-tts/output_audio`): temp dir for generated audio before upload.
+- `S3_ENDPOINT_URL`: S3-compatible endpoint (e.g., Backblaze B2).
+- `S3_ACCESS_KEY_ID`: S3 access key.
+- `S3_SECRET_ACCESS_KEY`: S3 secret.
+- `S3_BUCKET_NAME`: bucket to store generated audio.
+- `S3_REGION` (default `us-east-1`): region name for the client.
+- `HF_TOKEN`: Hugging Face token (required because the model weights are gated).
+
+**Request shape (serverless handler)**
+- `text` (str): text to synthesize.
+- `speaker_voice` (str, optional): filename in `AUDIO_VOICES_DIR`.
+- `parameters` (dict, optional): sampler config (num_steps, cfg_scale_text/speaker, cfg_min_t/cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale, speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed).
+- `session_id` (str, optional): used for output filename; defaults to UUID.
+
+**Response**
+- `status`: `completed` or `error`.
+- `filename`: generated audio filename (OGG).
+- `url`: presigned URL for download.
+- `s3_key`: object key in the bucket.
+- `metadata`: sample_rate, duration, seed.
+
 ## ⚠️ Responsible Use
 
 Don't use this model to:
