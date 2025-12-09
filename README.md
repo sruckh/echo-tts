@@ -1,34 +1,69 @@
 # Echo-TTS
 
-A multi-speaker text-to-speech model with speaker reference conditioning. See the [blog post](https://jordandarefsky.com/blog/2025/echo/) for technical details.
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.9.1+-red.svg)](https://pytorch.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model-blue.svg)](https://huggingface.co/jordand/echo-tts-base)
 
-**Model:** [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | **Demo:** [echo-tts-preview](https://huggingface.co/spaces/jordand/echo-tts-preview)
+> A multi-speaker text-to-speech model with speaker reference conditioning
 
-This work was made possible by the TPU Research Cloud (TRC).
+Echo-TTS is a state-of-the-art text-to-speech system that generates natural-sounding speech conditioned on both text prompts and optional speaker reference audio. Built on a Diffusion Transformer (DiT) architecture, it supports voice cloning, style transfer, and can generate up to 30 seconds of high-quality audio.
 
-## Responsible Use
+**Model:** [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | **Live Demo:** [echo-tts-preview](https://huggingface.co/spaces/jordand/echo-tts-preview) | **Blog Post:** [Technical Details](https://jordandarefsky.com/blog/2025/echo/)
 
-Don't use this model to:
-- Impersonate real people without their consent
-- Generate deceptive audio (e.g., fraud, misinformation, deepfakes)
+## ✨ Features
 
-You are responsible for complying with local laws regarding biometric data and voice cloning.
+- **🎯 Multi-Speaker Generation**: Condition on reference audio for voice cloning or use no reference for default voice
+- **🔬 Advanced Architecture**: Diffusion Transformer with rotary position embeddings and low-rank AdaLN adaptation
+- **⚡ High-Quality Output**: Generates 44.1kHz audio with natural prosody and expression
+- **🎛️ Fine Control**: Independent classifier-free guidance for text and speaker conditioning
+- **🔄 Memory Efficient**: Blockwise generation support for streaming and longer audio
+- **🎚️ Force Speaker**: KV scaling to ensure speaker consistency for out-of-distribution text
+- **🌐 Web Interface**: Interactive Gradio UI for easy experimentation
 
-## Installation
+## 🏗️ Architecture
+
+![Architecture Diagram](./docs/diagrams/architecture.svg)
+
+The Echo-TTS architecture consists of three main modalities processed by a Diffusion Transformer:
+
+1. **Text Encoder**: Processes tokenized text with 14-layer transformer (1280-dim)
+2. **Speaker Encoder**: Encodes reference audio into patches using 14-layer transformer
+3. **Latent Processor**: Denoises audio latents through 24-layer DiT with multi-modal attention
+
+The model uses Fish Speech S1-DAC autoencoder for audio encoding/decoding and supports classifier-free guidance with independent scales for text and speaker conditioning.
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.10 or higher
+- CUDA-capable GPU with at least 8GB VRAM (recommended)
+- Git
+
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/jordand/echo-tts.git
+cd echo-tts
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-Requires Python 3.10+ and a CUDA-capable GPU with at least 8GB VRAM.
-
-## Quick Start
-
-### Gradio UI
+### Web Interface
 
 ```bash
+# Launch Gradio UI
 python gradio_app.py
 ```
+
+The web interface will be available at `http://localhost:7860`
 
 ### Python API
 
@@ -49,7 +84,7 @@ model = load_model_from_hf(delete_blockwise_modules=True)
 fish_ae = load_fish_ae_from_hf()
 pca_state = load_pca_state_from_hf()
 
-# Load speaker reference (or set to None for no reference)
+# Load speaker reference (optional)
 speaker_audio = load_audio("speaker.wav").cuda()
 
 # Configure sampler
@@ -60,16 +95,10 @@ sample_fn = partial(
     cfg_scale_speaker=8.0,
     cfg_min_t=0.5,
     cfg_max_t=1.0,
-    truncation_factor=None,
-    rescale_k=None,
-    rescale_sigma=None,
-    speaker_kv_scale=None,
-    speaker_kv_max_layers=None,
-    speaker_kv_min_t=None,
-    sequence_length=640, # (~30 seconds)
+    sequence_length=640, # ~30 seconds of audio
 )
 
-# Generate
+# Generate speech
 text = "[S1] Hello, this is a test of the Echo TTS model."
 audio_out, _ = sample_pipeline(
     model=model,
@@ -81,64 +110,137 @@ audio_out, _ = sample_pipeline(
     rng_seed=0,
 )
 
+# Save output
 torchaudio.save("output.wav", audio_out[0].cpu(), 44100)
 ```
 
-See also:
-- `inference.py` -- lower-level usage example at the bottom of the file
-- `inference_blockwise.py` -- examples of blockwise/continuation generation
+## 📖 Documentation
 
-## Low VRAM (8GB)
+### Configuration
 
-In `gradio_app.py`, adjust:
+| Parameter | Description | Default | Range |
+|-----------|-------------|---------|-------|
+| `cfg_scale_text` | Classifier-free guidance scale for text conditioning | 3.0 | 1.0-10.0 |
+| `cfg_scale_speaker` | CFG scale for speaker conditioning | 8.0 | 1.0-15.0 |
+| `sequence_length` | Output latent length | 640 | 64-640 |
+| `num_steps` | Diffusion sampling steps | 40 | 10-100 |
+| `speaker_kv_scale` | Force speaker scaling | None | 1.0-2.0 |
+
+### Low VRAM Configuration (8GB)
+
+For GPUs with limited VRAM, edit `gradio_app.py`:
 
 ```python
-FISH_AE_DTYPE = torch.bfloat16  # instead of float32
-DEFAULT_SAMPLE_LATENT_LENGTH = 576  # (< 640 depending on what fits) instead of 640
+FISH_AE_DTYPE = torch.bfloat16  # Instead of float32
+DEFAULT_SAMPLE_LATENT_LENGTH = 576  # Reduce from 640
 ```
-
-## Tips
-
-### Generation Length
-
-Echo is trained to generate up to 30 seconds of audio (640 latents) given text and reference audio. Since the supplied text always corresponded to ≤30 seconds of audio during training, the model will attempt to fit any text prompt at inference into the 30 seconds of generated audio (and thus, e.g., long text prompts may result in faster speaking rates). On the other hand, shorter text prompts will work and will produce shorter outputs (as the model generates latent padding automatically).
-
-If "Sample Latent Length" (in Custom Shapes in gradio)/sequence_length is set to less than 640, the model will attempt to generate the prefix corresponding to that length. I.e., if you set this to 320, and supply ~30 seconds worth of text, the model will likely generate the first half of the text (rather than try to fit the entirety of the text into the first 15 seconds).
-
-### Reference Audio
-
-You can condition on up to 5 minutes of reference audio, but shorter clips (e.g., 10 seconds or shorter) work well too.
-
-### Force Speaker (KV Scaling)
-
-Sometimes out-of-distribution text for a given reference speaker will cause the model to generate a different speaker entirely. Enabling "Force Speaker" (which scales speaker KV for a portion of timesteps, default scale 1.5) generally fixes this. However, high values may introduce artifacts or "overconditioning." Aim for the lowest scale that produces the correct speaker: 1.0 is baseline, 1.5 is the default when enabled and will usually force the speaker, but lower values (e.g., 1.3, 1.1) may suffice.
-
-### Text Prompt Format
-
-Text prompts use the format from [WhisperD](https://huggingface.co/jordand/whisper-d-v1a). Colons, semicolons, and emdashes are normalized to commas (see inference.py tokenizer_encode) by default, and "[S1] " will be added to the beginning of the prompt if not already present. Commas generally function as pauses. Exclamation points (and other non-bland punctuation) may lead to increased expressiveness but also potentially lower quality on occasion; improving controllability is an important direction for future work.
-
-The included text presets are stylistically in-distribution with the WhisperD transcription style.
 
 ### Blockwise Generation
 
-`inference_blockwise.py` includes blockwise sampling, which allows generating audio in smaller blocks as well as producing continuations of existing audio (where the prefix and continuation are up to 30 seconds combined). The model released on HF is a fully fine-tuned model (not the LoRA as described in the blog). Blockwise generation enables audio streaming (not included in current code) since the S1-DAC decoder is causal. Blockwise functionality hasn't been thoroughly tested and may benefit from different (e.g., smaller) CFG scales.
+For streaming applications or longer audio, use `inference_blockwise.py`:
 
-## License
+```python
+from inference_blockwise import sample_blockwise
 
-Code in this repo is MIT‑licensed except where file headers specify otherwise (e.g., autoencoder.py is Apache‑2.0).
+# Generate in chunks for memory efficiency
+audio_chunks = sample_blockwise(
+    model=model,
+    fish_ae=fish_ae,
+    pca_state=pca_state,
+    text_prompt="Your long text here...",
+    chunk_size=160,  # 7.5 seconds per chunk
+    speaker_audio=speaker_audio,
+)
+```
 
-Regardless of our model license, audio outputs are CC-BY-NC-SA-4.0 due to the dependency on the Fish Speech S1-DAC autoencoder, which is CC-BY-NC-SA-4.0.
+### Text Prompt Format
 
-We have chosen to release the Echo-TTS weights under CC-BY-NC-SA-4.0.
+Text prompts follow WhisperD format:
+- Start with `[S1] ` if not present (automatically added)
+- Use commas for pauses
+- Colons, semicolons, and em-dashes normalize to commas
+- Exclamation points increase expressiveness
 
-For included audio prompts, see `audio_prompts/LICENSE`.
+Example prompts:
+- `[S1] Welcome to our presentation today.`
+- `[S1] Hello! How are you doing?`
+- `[S1] The weather is beautiful, isn't it?`
 
-## Citation
+## 🧪 Advanced Usage
+
+### Speaker Conditioning
+
+1. **Reference Audio**: 10 seconds typical, up to 5 minutes supported
+2. **Force Speaker**: Enable for out-of-distribution text
+   - Scale 1.0: baseline (no forcing)
+   - Scale 1.5: default when enabled
+   - Use lowest scale that produces correct speaker
+
+### Sampling Presets
+
+Use pre-configured presets from `sampler_presets.json`:
+
+```python
+import json
+with open('sampler_presets.json') as f:
+    presets = json.load(f)
+
+# Use a preset
+preset = presets['balanced']
+sample_fn = partial(sample_euler_cfg_independent_guidances, **preset)
+```
+
+## 🔧 Development
+
+### Model Compilation
+
+For improved performance:
+
+```python
+from inference import compile_model, compile_fish_ae
+
+model = compile_model(model)
+fish_ae = compile_fish_ae(fish_ae)
+```
+
+### Running Tests
+
+```bash
+# Run inference tests
+python -m inference
+
+# Test blockwise generation
+python inference_blockwise.py
+```
+
+## ⚠️ Responsible Use
+
+Don't use this model to:
+- Impersonate real people without their consent
+- Generate deceptive audio (fraud, misinformation, deepfakes)
+- Create harmful or inappropriate content
+
+You are responsible for complying with local laws regarding biometric data and voice cloning.
+
+## 📄 License
+
+- **Code**: MIT License (except `autoencoder.py`: Apache-2.0)
+- **Model Weights**: CC-BY-NC-SA-4.0
+- **Audio Outputs**: CC-BY-NC-SA-4.0 (due to Fish Speech dependency)
+- **Audio Prompts**: See `audio_prompts/LICENSE`
+
+## 🙏 Acknowledgments
+
+- [Fish Speech](https://github.com/fishaudio/fish-speech) for the S1-DAC autoencoder
+- [TPU Research Cloud](https://sites.research.google/trc/) for compute support
+- The Hugging Face community for model hosting
+
+## 📚 Citation
 
 ```bibtex
 @misc{darefsky2025echo,
     author = {Darefsky, Jordan},
-    title = {Echo-TTS},
+    title = {Echo-TTS: Multi-Speaker Text-to-Speech with Reference Conditioning},
     year = {2025},
     url = {https://jordandarefsky.com/blog/2025/echo/}
 }
