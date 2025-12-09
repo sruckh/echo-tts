@@ -17,6 +17,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && pip install --upgrade pip
 
 WORKDIR /runpod-volume/echo-tts
-COPY . /runpod-volume/echo-tts/
+
+# Only copy the minimal bootstrap assets; code is cloned in bootstrap.sh
+COPY bootstrap.sh /runpod-volume/echo-tts/bootstrap.sh
+COPY handler.py /runpod-volume/echo-tts/handler.py
 
 CMD ["bash", "/runpod-volume/echo-tts/bootstrap.sh"]
