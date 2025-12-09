@@ -13,8 +13,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates curl build-essential cmake ninja-build pkg-config ffmpeg \
     && rm -rf /var/lib/apt/lists/* \
     && ln -sf /usr/bin/python3.12 /usr/local/bin/python \
-    && ln -sf /usr/bin/pip3 /usr/local/bin/pip \
-    && pip install --upgrade pip
+    && ln -sf /usr/bin/pip3 /usr/local/bin/pip
 
 WORKDIR /runpod-volume/echo-tts
 
