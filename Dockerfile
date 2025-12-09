@@ -10,14 +10,14 @@ RUN apt-get update && \
         curl \
         ffmpeg \
         build-essential \
-        python3.12 \
-        python3.12-venv \
-        python3.12-pip \
-        python3.12-dev \
+        python3 \
+        python3-venv \
+        python3-pip \
+        python3-dev \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/* && \
-    update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
-    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3.12 1 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
+    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1 && \
     pip install --upgrade pip
 
 WORKDIR /opt/echo-tts
