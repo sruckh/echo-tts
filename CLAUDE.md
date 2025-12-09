@@ -2,6 +2,38 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+# 🛑 CRITICAL: DEPLOYMENT RULES
+
+## ⚠️ ABSOLUTELY NO LOCAL INSTALLATION
+**THIS PROJECT IS BEING CONVERTED TO RUNPOD SERVERLESS - DO NOT INSTALL LOCALLY**
+
+- **NEVER** run `pip install -r requirements.txt` on the host machine
+- **NEVER** install any dependencies locally
+- **NEVER** run the application locally on the host
+- **ALL** dependencies are installed at runtime inside the container
+- **ALL** development and testing happens in the container environment
+
+## 🐳 Docker Command Guidelines
+**DEPRECATED**: `docker-compose` (use `docker compose` instead)
+**CORRECT**: `docker compose` (space-separated command)
+
+```bash
+# ❌ WRONG - Deprecated
+docker-compose up
+
+# ✅ CORRECT
+docker compose up
+```
+
+## 🚀 Runpod Serverless Deployment
+This project is being converted from a standalone application to a Runpod serverless endpoint. All development must follow these rules:
+
+1. **Container-only development**: All code changes must be tested in the Docker container
+2. **Runtime dependency installation**: Use `Dockerfile` or container entrypoint scripts
+3. **Serverless architecture**: Design for stateless, request-response pattern
+4. **No persistent state**: Store all data in temporary container storage
+5. **Resource optimization**: Minimize container size and startup time
+
 # 🛑 STOP — Run codemap before ANY task
 
 ```bash
@@ -49,22 +81,35 @@ The model uses classifier-free guidance (CFG) with independent scales for text a
 
 ## Common Development Commands
 
-### Setup and Installation
+### 🐳 Container Development Only
 
 ```bash
-pip install -r requirements.txt
-```
+# Build the container
+docker build -t echo-tts .
 
-Requires Python 3.10+ and CUDA-capable GPU (8GB+ VRAM recommended).
+# Run the container for testing
+docker run --gpus all -p 7860:7860 echo-tts
+
+# Using docker compose (RECOMMENDED)
+docker compose up
+docker compose down
+```
 
 ### Running the Application
 
+**IMPORTANT**: Only run inside the container environment
+
 ```bash
-# Start Gradio web interface
+# Start Gradio web interface (inside container)
 python gradio_app.py
 
-# Run inference examples (see bottom of inference.py)
+# Run inference examples (inside container)
 python inference.py
+
+# Test serverless endpoint
+curl -X POST http://localhost:8080/inference \
+  -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "speaker_audio": null}'
 ```
 
 ### Low VRAM Configuration (8GB)
