@@ -6,7 +6,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/runpod-volume/echo-tts/models/hf-cache \
     HF_HUB_CACHE=/runpod-volume/echo-tts/models/hf-cache \
-    WORKSPACE=/opt/echo-tts
+    WORKSPACE=/runpod-volume/echo-tts
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip \
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/pip3 /usr/local/bin/pip \
     && pip install --upgrade pip
 
-WORKDIR /opt/echo-tts
-COPY . /opt/echo-tts/
+WORKDIR /runpod-volume/echo-tts
+COPY . /runpod-volume/echo-tts/
 
-CMD ["bash", "/opt/echo-tts/bootstrap.sh"]
+CMD ["bash", "/runpod-volume/echo-tts/bootstrap.sh"]
