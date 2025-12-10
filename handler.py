@@ -461,147 +461,64 @@ def health_check(request_id: Optional[str] = None) -> Dict:
 
 
 def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
-    """Core synthesis path shared by serverless handler and CLI warmup."""
-    request_id = job_id
-
-    log_with_flush("info", f"Starting synthesis. Job ID: {job_id}", request_id=request_id)
-    log_with_flush("debug", f"Input keys: {list(job_input.keys())}", request_id=request_id)
-
+    """Simplified synthesis function following Lotus pattern."""
     # Handle health check requests
     if job_input.get("action") == "health_check":
-        log_with_flush("info", "Health check requested", request_id=request_id)
-        return health_check(request_id=request_id)
-
-    # Validate configuration first
-    if not config.validate():
-        error_msg = f"Configuration validation failed: {'; '.join(config.validation_errors)}"
-        log_with_flush("error", error_msg, request_id=request_id)
-        return {"error": error_msg}
+        return health_check()
 
     # Validate text input
     text = job_input.get("text")
     if not text or not isinstance(text, str):
-        error_msg = "Missing or invalid 'text' field (expected string)"
-        log_with_flush("error", error_msg, request_id=request_id)
-        return {"error": error_msg}
+        return {"error": "Missing or invalid 'text' field (expected string)"}
 
     if len(text.strip()) == 0:
-        error_msg = "Text cannot be empty"
-        log_with_flush("error", error_msg, request_id=request_id)
-        return {"error": error_msg}
+        return {"error": "Text cannot be empty"}
 
     if len(text) > 2000:  # Reasonable limit for TTS
-        error_msg = f"Text too long: {len(text)} characters (max 2000)"
-        log_with_flush("error", error_msg, request_id=request_id)
-        return {"error": error_msg}
-
-    log_with_flush("info", f"Text length: {len(text)} characters", request_id=request_id)
+        return {"error": f"Text too long: {len(text)} characters (max 2000)"}
 
     speaker_voice_name = job_input.get("speaker_voice")
     parameters = job_input.get("parameters", {})
     seed = parameters.get("seed", job_input.get("seed", 0))
 
-    log_with_flush("info", f"Parameters: seed={seed}, speaker_voice={speaker_voice_name}", request_id=request_id)
-
     try:
-        # Progress: 0-30% - Load models
-        if job_id:
-            try:
-                runpod.serverless.progress_update(job_id, 10, "Loading models...")
-            except Exception as progress_error:
-                log_with_flush("warning", f"Failed to update progress: {progress_error}", request_id=request_id)
-
-        log_with_flush("info", "Loading models...", request_id=request_id)
-        model, fish_ae, pca_state = _load_models(request_id=request_id)
-        sample_fn = _build_sample_fn(parameters, request_id=request_id)
-
-        # Progress: 30-40% - Load speaker audio if provided
-        if job_id:
-            try:
-                runpod.serverless.progress_update(job_id, 30, "Processing speaker audio...")
-            except Exception as progress_error:
-                log_with_flush("warning", f"Failed to update progress: {progress_error}", request_id=request_id)
+        # Load models
+        model, fish_ae, pca_state = _load_models()
+        sample_fn = _build_sample_fn(parameters)
 
         # Optional speaker conditioning
-        speaker_audio: Optional[torch.Tensor] = None
+        speaker_audio = None
         if speaker_voice_name:
-            log_with_flush("info", f"Loading speaker voice: {speaker_voice_name}", request_id=request_id)
-            try:
-                candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
-                if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
-                    error_msg = "Invalid speaker_voice path (path traversal attempt)"
-                    log_with_flush("error", error_msg, request_id=request_id)
-                    return {"error": error_msg}
-                if not candidate_path.exists():
-                    error_msg = f"speaker_voice '{speaker_voice_name}' not found"
-                    log_with_flush("error", error_msg, request_id=request_id)
-                    return {"error": error_msg}
-                if candidate_path.suffix.lower() not in config.AUDIO_EXTS:
-                    error_msg = f"Unsupported speaker_voice extension: {candidate_path.suffix}"
-                    log_with_flush("error", error_msg, request_id=request_id)
-                    return {"error": error_msg}
+            candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
+            if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
+                return {"error": "Invalid speaker_voice path"}
+            if not candidate_path.exists():
+                return {"error": f"speaker_voice '{speaker_voice_name}' not found"}
+            if candidate_path.suffix.lower() not in config.AUDIO_EXTS:
+                return {"error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
 
-                speaker_audio = load_audio(str(candidate_path)).to(model.device)
-                log_with_flush("info", f"Speaker audio loaded: shape={speaker_audio.shape}", request_id=request_id)
-            except Exception as e:
-                error_trace = traceback.format_exc()
-                log_with_flush("error", f"Failed to load speaker_voice: {str(e)}", request_id=request_id)
-                log_with_flush("debug", f"Traceback:\n{error_trace}", request_id=request_id)
-                return {"error": f"Failed to load speaker_voice: {e}"}
-        else:
-            log_with_flush("info", "No speaker voice specified, using default", request_id=request_id)
+            speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
-        # Progress: 40-90% - Run generation
-        if job_id:
-            try:
-                runpod.serverless.progress_update(job_id, 40, "Generating audio...")
-            except Exception as progress_error:
-                log_with_flush("warning", f"Failed to update progress: {progress_error}", request_id=request_id)
-
-        log_with_flush("info", "Starting audio generation...", request_id=request_id)
-        gen_start = time.time()
-
-        try:
-            audio_out, _ = sample_pipeline(
-                model=model,
-                fish_ae=fish_ae,
-                pca_state=pca_state,
-                sample_fn=sample_fn,
-                text_prompt=text,
-                speaker_audio=speaker_audio,
-                rng_seed=seed,
-            )
-            gen_time = time.time() - gen_start
-            log_with_flush("info", f"Audio generation completed in {gen_time:.2f}s", request_id=request_id)
-        except Exception as gen_error:
-            error_trace = traceback.format_exc()
-            log_with_flush("error", f"Audio generation failed: {str(gen_error)}", request_id=request_id)
-            log_with_flush("error", f"Traceback:\n{error_trace}", request_id=request_id)
-            return {"error": f"Audio generation failed: {gen_error}"}
-
-        # Progress: 90-100% - Upload
-        if job_id:
-            try:
-                runpod.serverless.progress_update(job_id, 90, "Uploading audio...")
-            except Exception as progress_error:
-                log_with_flush("warning", f"Failed to update progress: {progress_error}", request_id=request_id)
+        # Generate audio
+        audio_out, _ = sample_pipeline(
+            model=model,
+            fish_ae=fish_ae,
+            pca_state=pca_state,
+            sample_fn=sample_fn,
+            text_prompt=text,
+            speaker_audio=speaker_audio,
+            rng_seed=seed,
+        )
 
         # Validate output
         if audio_out is None or len(audio_out) == 0:
-            error_msg = "No audio generated"
-            log_with_flush("error", error_msg, request_id=request_id)
-            return {"error": error_msg}
+            return {"error": "No audio generated"}
 
         duration_seconds = len(audio_out[0]) / 44_100
-        log_with_flush("info", f"Generated audio duration: {duration_seconds:.2f}s", request_id=request_id)
-
-        if duration_seconds < 0.1:
-            log_with_flush("warning", f"Very short audio generated: {duration_seconds:.2f}s", request_id=request_id)
-
         session_id = job_input.get("session_id") or str(uuid4())
-        upload_meta = _save_and_upload_audio(audio_out[0].cpu(), 44_100, session_id, request_id=request_id)
+        upload_meta = _save_and_upload_audio(audio_out[0].cpu(), 44_100, session_id)
 
-        result = {
+        return {
             "status": "completed",
             "filename": upload_meta["filename"],
             "url": upload_meta["url"],
@@ -610,19 +527,12 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
                 "sample_rate": 44_100,
                 "duration": duration_seconds,
                 "seed": seed,
-                "generation_time": gen_time,
                 "device": config.device,
             },
         }
 
-        log_with_flush("info", f"Synthesis completed successfully. File: {upload_meta['filename']}", request_id=request_id)
-        return result
-
     except Exception as e:
         error_trace = traceback.format_exc()
-        log_with_flush("error", f"Synthesis failed: {str(e)}", request_id=request_id)
-        log_with_flush("error", f"Error type: {type(e).__name__}", request_id=request_id)
-        log_with_flush("error", f"Traceback:\n{error_trace}", request_id=request_id)
         return {
             "error": str(e),
             "error_type": type(e).__name__,
@@ -631,197 +541,59 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
 
 def handler(job: Dict) -> Dict:
-    """RunPod serverless handler with enhanced logging and error handling."""
-    job_id = job.get("id")
-    log_with_flush("info", f"=== HANDLER CALLED === Job ID: {job_id}", request_id=job_id)
-
-    # Log incoming job structure (without sensitive data)
+    """RunPod serverless handler simplified like Lotus."""
     try:
-        job_input = job.get("input", {})
-        safe_input = {k: v for k, v in job_input.items() if k != "token"}
-        log_with_flush("info", f"Job input: {safe_input}", request_id=job_id)
-    except Exception as input_error:
-        log_with_flush("error", f"Failed to parse job input: {input_error}", request_id=job_id)
-        return {"error": f"Invalid job input: {input_error}"}
-
-    # Enhanced startup logging
-    if job_id:
-        log_with_flush("info", f"Processing job {job_id} at {time.strftime('%Y-%m-%d %H:%M:%S')}", request_id=job_id)
-
-    try:
-        # Validate basic job structure
-        if not isinstance(job, dict):
-            error_msg = f"Invalid job type: {type(job)}"
-            log_with_flush("error", error_msg, request_id=job_id)
-            return {"error": error_msg}
-
-        if "input" not in job:
-            error_msg = "Job missing 'input' field"
-            log_with_flush("error", error_msg, request_id=job_id)
-            return {"error": error_msg}
-
-        # Log handler state
-        log_with_flush("debug", f"Models cached: {list(_MODELS.keys())}", request_id=job_id)
-        log_with_flush("debug", f"Device: {config.device}", request_id=job_id)
-
-        # Process the job
-        result = _synthesize(job_input, job_id)
-
-        log_with_flush("debug", f"Synthesis result type: {type(result)}", request_id=job_id)
-        log_with_flush("debug", f"Synthesis result keys: {list(result.keys()) if isinstance(result, dict) else 'N/A'}", request_id=job_id)
-
-        # Wrap result in proper RunPod format
-        if isinstance(result, dict) and "error" in result:
-            # Return errors directly (RunPod expects {"error": "message"} format)
-            log_with_flush("error", f"Job failed with error: {result.get('error')}", request_id=job_id)
-            if "error_type" in result:
-                log_with_flush("error", f"Error type: {result.get('error_type')}", request_id=job_id)
-            return result
-        else:
-            # Wrap successful results in "output" key
-            log_with_flush("info", "Job completed successfully", request_id=job_id)
-            if isinstance(result, dict):
-                log_with_flush("debug", f"Returning output with keys: {list(result.keys())}", request_id=job_id)
-            return {"output": result}
-
+        return _synthesize(job.get("input", {}), job.get("id"))
     except Exception as e:
-        # Catch any unhandled exceptions
         error_trace = traceback.format_exc()
-        log_with_flush("error", f"=== UNHANDLED EXCEPTION IN HANDLER ===", request_id=job_id)
-        log_with_flush("error", f"Exception: {str(e)}", request_id=job_id)
-        log_with_flush("error", f"Exception type: {type(e).__name__}", request_id=job_id)
-        log_with_flush("error", f"Traceback:\n{error_trace}", request_id=job_id)
-
-        return {
-            "error": f"Unhandled exception: {str(e)}",
-            "error_type": type(e).__name__,
-            "traceback": error_trace
-        }
-
-    finally:
-        log_with_flush("debug", f"Handler function completed for job {job_id}", request_id=job_id)
+        print(f"ERROR: Handler failed: {str(e)}")
+        print(f"Traceback: {error_trace}")
+        return {"error": str(e), "error_type": type(e).__name__}
 
 
 def main() -> None:
-    """Main entry point with comprehensive startup diagnostics"""
+    """Simplified main entry point following Lotus pattern"""
     parser = argparse.ArgumentParser(description="RunPod handler for Echo-TTS")
     parser.add_argument("--warmup", action="store_true", help="Load models to warm cache; exits after.")
-    parser.add_argument("--rp_serve_api", action="store_true", help="Start RunPod serverless API.")
-    parser.add_argument("--test_env", action="store_true", help="Test environment configuration and exit.")
-    parser.add_argument("--test_health", action="store_true", help="Run health check and exit.")
-    args = parser.parse_args()
+    args, _ = parser.parse_known_args()
 
-    # Enhanced startup logging
-    log_with_flush("info", "=== Echo-TTS RunPod Handler Starting ===")
-    log_with_flush("info", f"Python version: {os.sys.version}")
-    log_with_flush("info", f"PyTorch version: {torch.__version__}")
-    log_with_flush("info", f"RunPod version: {runpod.__version__}")
-    log_with_flush("info", f"Working directory: {os.getcwd()}")
-    log_with_flush("info", f"Current time: {time.strftime('%Y-%m-%d %H:%M:%S UTC')}")
+    # Simple startup logging
+    print(f"=== Echo-TTS RunPod Handler Starting ===")
+    print(f"Device: {config.device}")
+    print(f"Working directory: {os.getcwd()}")
 
-    # Test environment configuration
-    if args.test_env:
-        log_with_flush("info", "=== Testing Environment Configuration ===")
-        config_valid = config.validate()
-        log_with_flush("info", f"Configuration valid: {config_valid}")
-
-        if config.validation_errors:
-            log_with_flush("error", "Configuration errors:")
-            for error in config.validation_errors:
-                log_with_flush("error", f"  - {error}")
-
-        # Test S3 connection if configured
-        if all([config.S3_ENDPOINT_URL, config.S3_ACCESS_KEY_ID, config.S3_SECRET_ACCESS_KEY, config.S3_BUCKET_NAME]):
-            try:
-                s3_client = _get_s3_client()
-                log_with_flush("info", "S3 client created successfully")
-
-                # Test bucket access (list objects)
-                response = s3_client.list_objects_v2(Bucket=config.S3_BUCKET_NAME, MaxKeys=1)
-                log_with_flush("info", f"S3 bucket access confirmed: {config.S3_BUCKET_NAME}")
-            except Exception as s3_error:
-                log_with_flush("error", f"S3 connection failed: {s3_error}")
-        else:
-            log_with_flush("warning", "S3 not fully configured")
-
-        return
-
-    # Test health check
-    if args.test_health:
-        log_with_flush("info", "=== Running Health Check ===")
-        health_result = health_check()
-        print(f"\nHealth Status: {health_result['status']}")
-        for check_name, check_result in health_result['checks'].items():
-            print(f"  {check_name}: {check_result['status']} - {check_result['details']}")
-        return
-
-    # Warmup models
+    # Warmup models if requested
     if args.warmup:
-        log_with_flush("info", "=== Starting Model Warmup ===")
-
-        # Validate configuration before warming up
-        if not config.validate():
-            log_with_flush("error", "Configuration validation failed - cannot warm up models")
-            return
-
+        print("=== Starting Model Warmup ===")
         try:
-            log_with_flush("info", "Loading models...")
+            # Validate configuration before warming up
+            if not config.validate():
+                print("ERROR: Configuration validation failed")
+                for error in config.validation_errors:
+                    print(f"  - {error}")
+                sys.exit(1)
+
+            print("Loading models...")
             model, fish_ae, pca_state = _load_models()
-            log_with_flush("info", "Warmup completed successfully")
-            log_with_flush("info", f"Models loaded: {list(_MODELS.keys())}")
+            print("Warmup completed successfully")
+            print(f"Models loaded: {list(_MODELS.keys())}")
         except Exception as e:
-            error_trace = traceback.format_exc()
-            log_with_flush("error", f"Warmup failed: {str(e)}")
-            log_with_flush("error", f"Traceback:\n{error_trace}")
-            raise
+            print(f"Warmup failed: {str(e)}")
+            traceback.print_exc()
+            sys.exit(1)
         return
 
-    # Start RunPod serverless API
-    if args.rp_serve_api:
-        log_with_flush("info", "=== Starting RunPod Serverless API ===")
+    # Validate configuration before starting
+    if not config.validate():
+        print("WARNING: Configuration has validation errors:")
+        for error in config.validation_errors:
+            print(f"  - {error}")
+        print("Starting anyway...")
 
-        # Final configuration check
-        log_with_flush("info", "Performing final configuration check...")
-        config_valid = config.validate()
-        if not config_valid:
-            log_with_flush("warning", "Configuration has validation errors, but starting anyway...")
-            for error in config.validation_errors:
-                log_with_flush("warning", f"  - {error}")
-
-        # Log final status
-        log_with_flush("info", f"Device: {config.device}")
-        log_with_flush("info", f"Models cached: {len(_MODELS)}")
-        log_with_flush("info", f"Audio directory: {config.AUDIO_VOICES_DIR}")
-        log_with_flush("info", f"Output directory: {config.OUTPUT_AUDIO_DIR}")
-        log_with_flush("info", f"S3 configured: {all([config.S3_ENDPOINT_URL, config.S3_ACCESS_KEY_ID, config.S3_SECRET_ACCESS_KEY, config.S3_BUCKET_NAME])}")
-
-        try:
-            log_with_flush("info", "Starting RunPod serverless worker...")
-            log_with_flush("info", "Handler ready to receive requests")
-
-            # Start the RunPod serverless worker with explicit configuration
-            worker_config = {
-                "handler": handler,
-                "refresh_worker": False  # Keep worker alive between requests
-            }
-
-            log_with_flush("info", f"Worker config: {worker_config}")
-
-            # Start the RunPod serverless worker
-            log_with_flush("info", "Calling runpod.serverless.start()...")
-            runpod.serverless.start(worker_config)
-            log_with_flush("info", "runpod.serverless.start() returned (this should not happen)")
-
-        except KeyboardInterrupt:
-            log_with_flush("info", "Server stopped by user")
-        except Exception as server_error:
-            error_trace = traceback.format_exc()
-            log_with_flush("error", f"Failed to start server: {str(server_error)}")
-            log_with_flush("error", f"Traceback:\n{error_trace}")
-            raise
-        return
-
-    parser.error("No action specified. Use --warmup, --rp_serve_api, --test_env, or --test_health.")
+    # Start the RunPod serverless worker (simple like Lotus)
+    print("Starting RunPod serverless worker...")
+    print("Handler ready to receive requests")
+    runpod.serverless.start({"handler": handler})
 
 
 if __name__ == "__main__":
