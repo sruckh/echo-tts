@@ -542,6 +542,7 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
 def handler(job: Dict) -> Dict:
     """RunPod serverless handler simplified like Lotus."""
+    print(f"DEBUG: Handler received job: {job.get('id')}")
     try:
         return _synthesize(job.get("input", {}), job.get("id"))
     except Exception as e:

@@ -91,7 +91,7 @@ else
 
     # Install additional serverless dependencies
     log "Installing serverless-specific dependencies..."
-    pip install runpod fastapi uvicorn[standard] pydantic python-multipart tqdm boto3
+    pip install runpod==1.6.1 fastapi uvicorn[standard] pydantic python-multipart tqdm boto3
 
     # Pre-download models using inference helpers
     log "Downloading Echo-TTS models via inference helpers..."
