@@ -319,7 +319,7 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
         log_with_flush("debug", f"Audio tensor shape: {audio_tensor.shape}, sample_rate: {sample_rate}", request_id=request_id)
 
         try:
-            torchaudio.save(tmp_path, audio_tensor, sample_rate, format="ogg")
+            torchaudio.save(tmp_path, audio_tensor, sample_rate)
             log_with_flush("debug", f"Audio saved successfully to: {tmp_path}", request_id=request_id)
         except Exception as save_error:
             error_msg = f"Failed to save audio file: {str(save_error)}"
