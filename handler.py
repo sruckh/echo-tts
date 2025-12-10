@@ -15,6 +15,7 @@ Output: uploads compressed audio (OGG) to S3-compatible storage and returns file
 
 import argparse
 import os
+import sys
 import time
 import traceback
 from functools import partial
@@ -40,22 +41,6 @@ from inference import (
 # Initialize RunPod structured logger
 log = runpod.RunPodLogger()
 
-# Enhanced logging with immediate output
-def log_with_flush(level: str, message: str, request_id: Optional[str] = None):
-    """Log message and immediately flush to ensure visibility"""
-    if level == "info":
-        log.info(message, request_id=request_id)
-    elif level == "error":
-        log.error(message, request_id=request_id)
-    elif level == "debug":
-        log.debug(message, request_id=request_id)
-    elif level == "warning":
-        log.warning(message, request_id=request_id)
-    # Force flush for critical messages
-    import sys
-    sys.stdout.flush()
-    sys.stderr.flush()
-
 # Environment Configuration and Validation
 class Config:
     """Configuration validation and storage"""
@@ -67,7 +52,7 @@ class Config:
         if torch.cuda.is_available():
             self.gpu_name = torch.cuda.get_device_name(0)
             self.gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
-            log_with_flush("info", f"GPU detected: {self.gpu_name} with {self.gpu_memory:.1f}GB memory")
+            log.info(f"GPU detected: {self.gpu_name} with {self.gpu_memory:.1f}GB memory")
 
         # Required environment variables
         self.HF_TOKEN = os.environ.get("HF_TOKEN")
@@ -95,7 +80,7 @@ class Config:
         try:
             self.AUDIO_VOICES_DIR.mkdir(parents=True, exist_ok=True)
             self.OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-            log_with_flush("info", f"Audio directories: {self.AUDIO_VOICES_DIR}, {self.OUTPUT_AUDIO_DIR}")
+            log.info(f"Audio directories: {self.AUDIO_VOICES_DIR}, {self.OUTPUT_AUDIO_DIR}")
         except Exception as e:
             self.validation_errors.append(f"Failed to create directories: {e}")
 
@@ -103,31 +88,31 @@ class Config:
         self.AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac", ".opus"}
 
         # Log all environment variables (without sensitive data)
-        log_with_flush("info", f"Device: {self.device}")
-        log_with_flush("info", f"AUDIO_VOICES_DIR: {self.AUDIO_VOICES_DIR}")
-        log_with_flush("info", f"OUTPUT_AUDIO_DIR: {self.OUTPUT_AUDIO_DIR}")
-        log_with_flush("info", f"S3_ENDPOINT_URL: {'SET' if self.S3_ENDPOINT_URL else 'NOT SET'}")
-        log_with_flush("info", f"S3_BUCKET_NAME: {'SET' if self.S3_BUCKET_NAME else 'NOT SET'}")
-        log_with_flush("info", f"HF_TOKEN: {'SET' if self.HF_TOKEN else 'NOT SET'}")
+        log.info(f"Device: {self.device}")
+        log.debug(f"AUDIO_VOICES_DIR: {self.AUDIO_VOICES_DIR}")
+        log.debug(f"OUTPUT_AUDIO_DIR: {'SET' if self.OUTPUT_AUDIO_DIR else 'NOT SET'}")
+        log.debug(f"S3_ENDPOINT_URL: {'SET' if self.S3_ENDPOINT_URL else 'NOT SET'}")
+        log.info(f"S3_BUCKET_NAME: {'SET' if self.S3_BUCKET_NAME else 'NOT SET'}")
+        log.info(f"HF_TOKEN: {'SET' if self.HF_TOKEN else 'NOT SET'}")
 
         # Check audio files in voices directory
         try:
             audio_files = list(self.AUDIO_VOICES_DIR.glob("*"))
             audio_files = [f for f in audio_files if f.suffix.lower() in self.AUDIO_EXTS]
-            log_with_flush("info", f"Found {len(audio_files)} audio files in voices directory")
+            log.debug(f"Found {len(audio_files)} audio files")
             for f in audio_files[:5]:  # Log first 5
-                log_with_flush("info", f"  - {f.name}")
+                log.debug(f"  - {f.name}")
             if len(audio_files) > 5:
-                log_with_flush("info", f"  ... and {len(audio_files) - 5} more")
+                log.debug(f"  ... and {len(audio_files) - 5} more")
         except Exception as e:
-            log_with_flush("warning", f"Could not scan audio directory: {e}")
+            log.warning(f"Could not scan audio directory: {e}")
 
     def validate(self) -> bool:
         """Return True if configuration is valid"""
         if self.validation_errors:
-            log_with_flush("error", "Configuration validation failed:")
+            log.error("Configuration validation failed:")
             for error in self.validation_errors:
-                log_with_flush("error", f"  - {error}")
+                log.error(f"  - {error}")
             return False
         return True
 
@@ -142,34 +127,34 @@ def _load_models(device: str = None, request_id: Optional[str] = None) -> Tuple[
     if device is None:
         device = config.device
 
-    log_with_flush("debug", f"_load_models called. Current cache: {list(_MODELS.keys())}", request_id=request_id)
+    log.debug(f"_load_models called. Current cache: {list(_MODELS.keys())}", request_id=request_id)
 
     if _MODELS:
-        log_with_flush("info", "Models already cached, reusing", request_id=request_id)
+        log.info("Models already cached, reusing", request_id=request_id)
         return _MODELS["model"], _MODELS["fish_ae"], _MODELS["pca_state"]
 
     # Validate HF token before attempting to load models
     if not config.HF_TOKEN:
         error_msg = "HF_TOKEN is required to load models from HuggingFace"
-        log_with_flush("error", error_msg, request_id=request_id)
+        log.error(error_msg, request_id=request_id)
         raise RuntimeError(error_msg)
 
-    log_with_flush("info", f"Starting model loading on device: {device}", request_id=request_id)
+    log.info(f"Starting model loading on device: {device}", request_id=request_id)
     start_time = time.time()
 
     try:
         torch_dtype = torch.bfloat16 if device.startswith("cuda") else None
-        log_with_flush("info", f"Using dtype: {torch_dtype}", request_id=request_id)
+        log.debug(f"Using dtype: {torch_dtype}", request_id=request_id)
 
         # Check available memory
         if device.startswith("cuda"):
             allocated = torch.cuda.memory_allocated(0) / (1024**3)  # GB
             cached = torch.cuda.memory_reserved(0) / (1024**3)  # GB
             total = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
-            log_with_flush("info", f"GPU memory: {allocated:.1f}GB allocated, {cached:.1f}GB cached, {total:.1f}GB total", request_id=request_id)
+            log.debug(f"GPU memory: {allocated:.1f}GB allocated, {cached:.1f}GB cached, {total:.1f}GB total", request_id=request_id)
 
         # Load main model
-        log_with_flush("info", "Loading EchoDiT model from HuggingFace...", request_id=request_id)
+        log.info("Loading EchoDiT model from HuggingFace...", request_id=request_id)
         model_start = time.time()
 
         try:
@@ -181,14 +166,14 @@ def _load_models(device: str = None, request_id: Optional[str] = None) -> Tuple[
                 token=config.HF_TOKEN
             )
             model_time = time.time() - model_start
-            log_with_flush("info", f"EchoDiT model loaded in {model_time:.2f}s", request_id=request_id)
+            log.info(f"EchoDiT model loaded in {model_time:.2f}s", request_id=request_id)
         except Exception as model_error:
             error_msg = f"Failed to load EchoDiT model: {str(model_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         # Load autoencoder
-        log_with_flush("info", "Loading Fish Speech S1-DAC autoencoder from HuggingFace...", request_id=request_id)
+        log.info("Loading Fish Speech S1-DAC autoencoder from HuggingFace...", request_id=request_id)
         ae_start = time.time()
 
         try:
@@ -199,43 +184,43 @@ def _load_models(device: str = None, request_id: Optional[str] = None) -> Tuple[
                 token=config.HF_TOKEN
             )
             ae_time = time.time() - ae_start
-            log_with_flush("info", f"Autoencoder loaded in {ae_time:.2f}s", request_id=request_id)
+            log.info(f"Autoencoder loaded in {ae_time:.2f}s", request_id=request_id)
         except Exception as ae_error:
             error_msg = f"Failed to load autoencoder: {str(ae_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         # Load PCA state
-        log_with_flush("info", "Loading PCA state from HuggingFace...", request_id=request_id)
+        log.info("Loading PCA state from HuggingFace...", request_id=request_id)
         pca_start = time.time()
 
         try:
             pca_state = load_pca_state_from_hf(device=device, token=config.HF_TOKEN)
             pca_time = time.time() - pca_start
-            log_with_flush("info", f"PCA state loaded in {pca_time:.2f}s", request_id=request_id)
+            log.info(f"PCA state loaded in {pca_time:.2f}s", request_id=request_id)
         except Exception as pca_error:
             error_msg = f"Failed to load PCA state: {str(pca_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         # Cache models
         _MODELS.update({"model": model, "fish_ae": fish_ae, "pca_state": pca_state})
 
         total_time = time.time() - start_time
-        log_with_flush("info", f"All models loaded successfully in {total_time:.2f}s", request_id=request_id)
+        log.info(f"All models loaded successfully in {total_time:.2f}s", request_id=request_id)
 
         # Log memory usage after loading
         if device.startswith("cuda"):
             allocated = torch.cuda.memory_allocated(0) / (1024**3)  # GB
             cached = torch.cuda.memory_reserved(0) / (1024**3)  # GB
-            log_with_flush("info", f"GPU memory after loading: {allocated:.1f}GB allocated, {cached:.1f}GB cached", request_id=request_id)
+            log.debug(f"GPU memory after loading: {allocated:.1f}GB allocated, {cached:.1f}GB cached", request_id=request_id)
 
         return model, fish_ae, pca_state
 
     except Exception as e:
         error_trace = traceback.format_exc()
-        log_with_flush("error", f"Model loading failed: {str(e)}", request_id=request_id)
-        log_with_flush("error", f"Traceback:\n{error_trace}", request_id=request_id)
+        log.error(f"Model loading failed: {str(e)}", request_id=request_id)
+        log.error(f"Traceback:\n{error_trace}", request_id=request_id)
         raise
 
 
@@ -261,7 +246,7 @@ def _build_sample_fn(params: Dict, request_id: Optional[str] = None) -> callable
 
 def _get_s3_client():
     """Create and return S3 client with enhanced error handling"""
-    log_with_flush("debug", "Creating S3 client...")
+    log.debug("Creating S3 client...")
 
     # Check S3 configuration
     if not all([config.S3_ENDPOINT_URL, config.S3_ACCESS_KEY_ID, config.S3_SECRET_ACCESS_KEY, config.S3_BUCKET_NAME]):
@@ -276,7 +261,7 @@ def _get_s3_client():
             missing.append("S3_BUCKET_NAME")
 
         error_msg = f"Missing S3 configuration: {', '.join(missing)}"
-        log_with_flush("error", error_msg)
+        log.error(error_msg)
         raise RuntimeError(error_msg)
 
     try:
@@ -287,17 +272,17 @@ def _get_s3_client():
             aws_access_key_id=config.S3_ACCESS_KEY_ID,
             aws_secret_access_key=config.S3_SECRET_ACCESS_KEY,
         )
-        log_with_flush("info", f"S3 client created for endpoint: {config.S3_ENDPOINT_URL}")
+        log.info(f"S3 client created for endpoint: {config.S3_ENDPOINT_URL}")
         return client
     except Exception as e:
         error_msg = f"Failed to create S3 client: {str(e)}"
-        log_with_flush("error", error_msg)
+        log.error(error_msg)
         raise RuntimeError(error_msg)
 
 
 def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session_id: str, request_id: Optional[str] = None) -> Dict[str, str]:
     """Save audio to OGG (Vorbis) and upload to S3-compatible storage."""
-    log_with_flush("info", f"Saving and uploading audio for session: {session_id}", request_id=request_id)
+    log.info(f"Saving and uploading audio for session: {session_id}", request_id=request_id)
 
     # Ensure output directory exists
     config.OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
@@ -308,7 +293,7 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
         tmp_path = tmp.name
 
     try:
-        log_with_flush("debug", f"Saving audio to temporary file: {tmp_path}", request_id=request_id)
+        log.debug(f"Saving audio to temporary file: {tmp_path}", request_id=request_id)
 
         # Validate audio tensor
         if audio_tensor is None:
@@ -316,14 +301,14 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
         if len(audio_tensor.shape) < 2:
             raise RuntimeError(f"Invalid audio tensor shape: {audio_tensor.shape}")
 
-        log_with_flush("debug", f"Audio tensor shape: {audio_tensor.shape}, sample_rate: {sample_rate}", request_id=request_id)
+        log.debug(f"Audio tensor shape: {audio_tensor.shape}, sample_rate: {sample_rate}", request_id=request_id)
 
         try:
             torchaudio.save(tmp_path, audio_tensor, sample_rate)
-            log_with_flush("debug", f"Audio saved successfully to: {tmp_path}", request_id=request_id)
+            log.debug(f"Audio saved successfully to: {tmp_path}", request_id=request_id)
         except Exception as save_error:
             error_msg = f"Failed to save audio file: {str(save_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         # Read the saved file
@@ -332,17 +317,17 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
                 data = f.read()
         except Exception as read_error:
             error_msg = f"Failed to read saved audio file: {str(read_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         file_size_mb = len(data) / (1024 * 1024)
-        log_with_flush("info", f"Audio file size: {file_size_mb:.2f}MB", request_id=request_id)
+        log.info(f"Audio file size: {file_size_mb:.2f}MB", request_id=request_id)
 
         if file_size_mb > 50:  # Warn if file is very large
-            log_with_flush("warning", f"Large audio file: {file_size_mb:.2f}MB", request_id=request_id)
+            log.warning(f"Large audio file: {file_size_mb:.2f}MB", request_id=request_id)
 
         # Upload to S3
-        log_with_flush("debug", "Uploading to S3...", request_id=request_id)
+        log.debug("Uploading to S3...", request_id=request_id)
         try:
             s3 = _get_s3_client()
             s3.put_object(
@@ -351,10 +336,10 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
                 Body=data,
                 ContentType="audio/ogg",
             )
-            log_with_flush("debug", f"Successfully uploaded to S3: {key}", request_id=request_id)
+            log.debug(f"Successfully uploaded to S3: {key}", request_id=request_id)
         except Exception as upload_error:
             error_msg = f"Failed to upload to S3: {str(upload_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         # Generate presigned URL
@@ -364,32 +349,32 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
                 Params={"Bucket": config.S3_BUCKET_NAME, "Key": key},
                 ExpiresIn=3600,
             )
-            log_with_flush("debug", "Presigned URL generated successfully", request_id=request_id)
+            log.debug("Presigned URL generated successfully", request_id=request_id)
         except Exception as url_error:
             error_msg = f"Failed to generate presigned URL: {str(url_error)}"
-            log_with_flush("error", error_msg, request_id=request_id)
+            log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
-        log_with_flush("info", f"Audio uploaded successfully: {key}", request_id=request_id)
+        log.info(f"Audio uploaded successfully: {key}", request_id=request_id)
         return {"filename": filename, "url": presigned_url, "key": key}
 
     except Exception as e:
         error_msg = f"Failed to save/upload audio: {str(e)}"
-        log_with_flush("error", error_msg, request_id=request_id)
+        log.error(error_msg, request_id=request_id)
         raise
 
     finally:
         # Clean up temporary file
         try:
             os.unlink(tmp_path)
-            log_with_flush("debug", f"Cleaned up temporary file: {tmp_path}", request_id=request_id)
+            log.debug(f"Cleaned up temporary file: {tmp_path}", request_id=request_id)
         except OSError as cleanup_error:
-            log_with_flush("warning", f"Failed to clean up temporary file {tmp_path}: {cleanup_error}", request_id=request_id)
+            log.warning(f"Failed to clean up temporary file {tmp_path}: {cleanup_error}", request_id=request_id)
 
 
 def health_check(request_id: Optional[str] = None) -> Dict:
     """Comprehensive health check for the TTS service"""
-    log_with_flush("info", "Performing health check...", request_id=request_id)
+    log.info("Performing health check...", request_id=request_id)
 
     health_status = {
         "status": "healthy",
@@ -456,7 +441,7 @@ def health_check(request_id: Optional[str] = None) -> Dict:
     all_pass = all(check["status"] == "pass" for check in health_status["checks"].values())
     health_status["status"] = "healthy" if all_pass else "unhealthy"
 
-    log_with_flush("info", f"Health check completed: {health_status['status']}", request_id=request_id)
+    log.info(f"Health check completed: {health_status['status']}", request_id=request_id)
     return health_status
 
 
@@ -542,13 +527,13 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
 def handler(job: Dict) -> Dict:
     """RunPod serverless handler simplified like Lotus."""
-    print(f"DEBUG: Handler received job: {job.get('id')}")
+    log.debug(f"Handler received job: {job.get('id')}")
     try:
         return _synthesize(job.get("input", {}), job.get("id"))
     except Exception as e:
         error_trace = traceback.format_exc()
-        print(f"ERROR: Handler failed: {str(e)}")
-        print(f"Traceback: {error_trace}")
+        log.error(f"Handler failed: {str(e)}")
+        log.error(f"Traceback: {error_trace}")
         return {"error": str(e), "error_type": type(e).__name__}
 
 
