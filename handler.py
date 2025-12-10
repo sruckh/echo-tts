@@ -19,6 +19,7 @@ from functools import partial
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 from uuid import uuid4
+import tempfile
 
 import runpod
 import torch

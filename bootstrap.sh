@@ -20,6 +20,9 @@ SRC="$REMOTE_DIR"
 AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-/runpod-volume/echo-tts/audio_voices}"
 OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-/runpod-volume/echo-tts/output_audio}"
 
+# Ensure install dir exists before redirecting logs
+mkdir -p "$INSTALL_DIR"
+
 # Logging
 LOG_FILE="$INSTALL_DIR/bootstrap.log"
 exec > >(tee -a "$LOG_FILE")
@@ -47,8 +50,7 @@ fi
 
 log "Starting fresh installation..."
 
-# Create install directory
-mkdir -p "$INSTALL_DIR"
+# Create install directory (already ensured for logging)
 cd "$INSTALL_DIR"
 
 # Clone remote repository
