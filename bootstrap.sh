@@ -76,6 +76,7 @@ if [ "$INSTALLED" = false ]; then
     # Activate virtual environment for installs
     log "Activating virtual environment for install..."
     source "$VENV_DIR/bin/activate"
+    VENV_ACTIVATED=true
 
     # Install dependencies
     log "Installing Python dependencies..."
@@ -135,9 +136,11 @@ else
     mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODELS_DIR"
 fi
 
-# Activate virtual environment (for both fresh and reuse)
-log "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
+# Activate virtual environment (ensure active for reuse)
+if [ "${VENV_ACTIVATED:-false}" = false ]; then
+    log "Activating virtual environment..."
+    source "$VENV_DIR/bin/activate"
+fi
 
 # Optional warmup (non-fatal if it fails)
 log "Running optional handler warmup..."
