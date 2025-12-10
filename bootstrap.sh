@@ -31,34 +31,36 @@ exec 2>&1
 echo "Log file: $LOG_FILE"
 echo "Install directory: $INSTALL_DIR"
 
-# Function to check if command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
-}
-
 # Function to print with timestamp
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-INSTALLED=false
+# Check if already installed
 if [ -f "$FLAG_FILE" ]; then
-    INSTALLED=true
     log "Echo-TTS already installed. Reusing existing environment."
+    log "Flag file: $FLAG_FILE"
     log "To force reinstall, delete: $FLAG_FILE"
-fi
 
-# Create install directory (already ensured for logging)
-cd "$INSTALL_DIR"
+    # Verify venv exists
+    if [ ! -d "$VENV_DIR" ]; then
+        log "ERROR: Venv missing despite install flag. Delete $FLAG_FILE to reinstall."
+        exit 1
+    fi
 
-if [ "$INSTALLED" = false ]; then
+    # Activate virtual environment for reuse
+    log "Activating virtual environment..."
+    source "$VENV_DIR/bin/activate"
+else
     log "Starting fresh installation..."
 
     # Clone remote repository
     log "Cloning Echo-TTS repository from $REMOTE_REPO_URL..."
     git clone "$REMOTE_REPO_URL" "$REMOTE_DIR"
+
+    # Copy handler from local source
+    log "Copying handler.py from local source..."
     cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
-    mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR"
 
     # Remove gradio from requirements.txt
     log "Removing gradio from requirements.txt..."
@@ -73,10 +75,9 @@ if [ "$INSTALLED" = false ]; then
     log "Creating Python virtual environment..."
     python3.12 -m venv "$VENV_DIR"
 
-    # Activate virtual environment for installs
-    log "Activating virtual environment for install..."
+    # Activate virtual environment and install dependencies
+    log "Activating virtual environment..."
     source "$VENV_DIR/bin/activate"
-    VENV_ACTIVATED=true
 
     # Install dependencies
     log "Installing Python dependencies..."
@@ -92,16 +93,16 @@ if [ "$INSTALLED" = false ]; then
         pip install torch torchaudio huggingface-hub safetensors numpy einops fastapi uvicorn
     fi
 
-    # Install additional serverless dependencies (in venv)
+    # Install additional serverless dependencies
     log "Installing serverless-specific dependencies..."
     pip install runpod fastapi uvicorn[standard] pydantic python-multipart tqdm boto3
 
-    # Pre-download models using inference helpers (will also cache weights)
+    # Pre-download models using inference helpers
     log "Downloading Echo-TTS models via inference helpers..."
-    mkdir -p "$MODELS_DIR"
     export HF_HOME="$MODELS_DIR/hf-cache"
     export HF_HUB_CACHE="$MODELS_DIR/hf-cache"
     export PYTHONPATH="$REMOTE_DIR:$PYTHONPATH"
+
     python3 - << 'PY'
 import os
 from inference import load_model_from_hf, load_fish_ae_from_hf, load_pca_state_from_hf
@@ -124,28 +125,23 @@ PY
     # Create installation flag file
     log "Marking installation complete..."
     touch "$FLAG_FILE"
-    log "Created installation flag: $FLAG_FILE"
+    log "Installation complete"
+fi
+
+# Ensure required directories exist (for both fresh install and reuse)
+log "Ensuring required directories exist..."
+mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODELS_DIR"
+
+# Optional warmup (log failures but don't stop)
+log "Running handler warmup..."
+if python "$SRC/handler.py" --warmup; then
+    log "Warmup completed successfully"
 else
-    # Reuse existing install; ensure virtualenv exists
-    if [ ! -d "$VENV_DIR" ]; then
-        log "ERROR: Venv missing despite install flag. Delete $FLAG_FILE to reinstall."
-        exit 1
-    fi
-
-    # Ensure directories exist when reusing
-    mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODELS_DIR"
+    log "WARNING: Warmup failed (exit code: $?)"
+    log "This may indicate a problem, but continuing anyway..."
 fi
-
-# Activate virtual environment (ensure active for reuse)
-if [ "${VENV_ACTIVATED:-false}" = false ]; then
-    log "Activating virtual environment..."
-    source "$VENV_DIR/bin/activate"
-fi
-
-# Optional warmup (non-fatal if it fails)
-log "Running optional handler warmup..."
-python "$SRC/handler.py" --warmup || true
 
 # Start handler (runpod serverless mode)
 log "Starting RunPod handler..."
+log "Container ready for requests"
 exec python "$SRC/handler.py" --rp_serve_api
