@@ -58,8 +58,7 @@ if [ "$INSTALLED" = false ]; then
     log "Cloning Echo-TTS repository from $REMOTE_REPO_URL..."
     git clone "$REMOTE_REPO_URL" "$REMOTE_DIR"
     cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
-    mkdir -p "$AUDIO_VOICES_DIR"
-    mkdir -p "$OUTPUT_AUDIO_DIR"
+    mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR"
 
     # Remove gradio from requirements.txt
     log "Removing gradio from requirements.txt..."
@@ -74,8 +73,8 @@ if [ "$INSTALLED" = false ]; then
     log "Creating Python virtual environment..."
     python3.12 -m venv "$VENV_DIR"
 
-    # Activate virtual environment
-    log "Activating virtual environment..."
+    # Activate virtual environment for installs
+    log "Activating virtual environment for install..."
     source "$VENV_DIR/bin/activate"
 
     # Install dependencies
@@ -92,16 +91,16 @@ if [ "$INSTALLED" = false ]; then
         pip install torch torchaudio huggingface-hub safetensors numpy einops fastapi uvicorn
     fi
 
-    # Install additional serverless dependencies
+    # Install additional serverless dependencies (in venv)
     log "Installing serverless-specific dependencies..."
     pip install runpod fastapi uvicorn[standard] pydantic python-multipart tqdm boto3
 
     # Pre-download models using inference helpers (will also cache weights)
     log "Downloading Echo-TTS models via inference helpers..."
     mkdir -p "$MODELS_DIR"
-export HF_HOME="$MODELS_DIR/hf-cache"
-export HF_HUB_CACHE="$MODELS_DIR/hf-cache"
-export PYTHONPATH="$REMOTE_DIR:$PYTHONPATH"
+    export HF_HOME="$MODELS_DIR/hf-cache"
+    export HF_HUB_CACHE="$MODELS_DIR/hf-cache"
+    export PYTHONPATH="$REMOTE_DIR:$PYTHONPATH"
     python3 - << 'PY'
 import os
 from inference import load_model_from_hf, load_fish_ae_from_hf, load_pca_state_from_hf
