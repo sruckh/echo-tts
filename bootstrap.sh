@@ -132,16 +132,7 @@ cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
 log "Ensuring required directories exist..."
 mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODELS_DIR"
 
-# Optional warmup (log failures but don't stop)
-log "Running handler warmup..."
-if python "$SRC/handler.py" --warmup; then
-    log "Warmup completed successfully"
-else
-    log "WARNING: Warmup failed (exit code: $?)"
-    log "This may indicate a problem, but continuing anyway..."
-fi
-
 # Start handler (runpod serverless mode)
 log "Starting RunPod handler..."
 log "Container ready for requests"
-exec python "$SRC/handler.py" --rp_serve_api
+exec python "$SRC/handler.py"
