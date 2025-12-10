@@ -799,8 +799,18 @@ def main() -> None:
             log_with_flush("info", "Starting RunPod serverless worker...")
             log_with_flush("info", "Handler ready to receive requests")
 
+            # Start the RunPod serverless worker with explicit configuration
+            worker_config = {
+                "handler": handler,
+                "refresh_worker": False  # Keep worker alive between requests
+            }
+
+            log_with_flush("info", f"Worker config: {worker_config}")
+
             # Start the RunPod serverless worker
-            runpod.serverless.start({"handler": handler})
+            log_with_flush("info", "Calling runpod.serverless.start()...")
+            runpod.serverless.start(worker_config)
+            log_with_flush("info", "runpod.serverless.start() returned (this should not happen)")
 
         except KeyboardInterrupt:
             log_with_flush("info", "Server stopped by user")
