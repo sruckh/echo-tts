@@ -5,8 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/runpod-volume/echo-tts/models/hf-cache \
-    HF_HUB_CACHE=/runpod-volume/echo-tts/models/hf-cache \
-    WORKSPACE=/runpod-volume/echo-tts
+    HF_HUB_CACHE=/runpod-volume/echo-tts/models/hf-cache
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip \
@@ -15,10 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.12 /usr/local/bin/python \
     && ln -sf /usr/bin/pip3 /usr/local/bin/pip
 
-WORKDIR /runpod-volume/echo-tts
+WORKDIR /workspace/echo-tts
 
 # Only copy the minimal bootstrap assets; code is cloned in bootstrap.sh
-COPY bootstrap.sh /runpod-volume/echo-tts/bootstrap.sh
-COPY handler.py /runpod-volume/echo-tts/handler.py
+COPY bootstrap.sh /workspace/echo-tts/bootstrap.sh
+COPY handler.py /workspace/echo-tts/handler.py
 
-CMD ["bash", "/runpod-volume/echo-tts/bootstrap.sh"]
+CMD ["bash", "/workspace/echo-tts/bootstrap.sh"]

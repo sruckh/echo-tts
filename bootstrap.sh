@@ -8,18 +8,17 @@ set -e  # Exit on any error
 echo "=== Echo-TTS Runpod Bootstrap Starting ==="
 
 # Configuration
-INSTALL_DIR="/runpod-volume/echo-tts"
+# Startup assets live on OS disk (/workspace/echo-tts). Data/model/cache go to /runpod-volume unless overridden.
+INSTALL_DIR="${INSTALL_DIR:-/runpod-volume/echo-tts}"
 VENV_DIR="$INSTALL_DIR/venv"
 REMOTE_REPO_URL="https://github.com/jordandare/echo-tts.git"
 REMOTE_DIR="$INSTALL_DIR/echo-tts-remote"
 MODELS_DIR="$INSTALL_DIR/models"
 FLAG_FILE="$INSTALL_DIR/.installed_flag"
-MODEL_WEIGHTS_FILENAME="pytorch_model.safetensors"
-PCA_STATE_FILENAME="pca_state.safetensors"
-LOCAL_SRC_DIR="/opt/echo-tts"
+LOCAL_SRC_DIR="/workspace/echo-tts"  # handler/bootstrap copied into the image here
 SRC="$REMOTE_DIR"
-AUDIO_VOICES_DIR="$INSTALL_DIR/audio_voices"
-OUTPUT_AUDIO_DIR="$INSTALL_DIR/output_audio"
+AUDIO_VOICES_DIR="${AUDIO_VOICES_DIR:-/runpod-volume/echo-tts/audio_voices}"
+OUTPUT_AUDIO_DIR="${OUTPUT_AUDIO_DIR:-/runpod-volume/echo-tts/output_audio}"
 
 # Logging
 LOG_FILE="$INSTALL_DIR/bootstrap.log"
@@ -99,7 +98,8 @@ log "Downloading Echo-TTS models via inference helpers..."
 mkdir -p "$MODELS_DIR"
 export HF_HOME="$MODELS_DIR/hf-cache"
 export HF_HUB_CACHE="$MODELS_DIR/hf-cache"
-PYTHONPATH="$REMOTE_DIR:$PYTHONPATH" python3 - << 'PY'
+export PYTHONPATH="$REMOTE_DIR:$PYTHONPATH"
+python3 - << 'PY'
 import os
 from inference import load_model_from_hf, load_fish_ae_from_hf, load_pca_state_from_hf
 

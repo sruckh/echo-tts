@@ -218,8 +218,8 @@ python inference_blockwise.py
 The serverless path uses `handler.py` to warm up models and serve requests. Reference voices come from filenames (no base64) located in a mounted directory, and outputs are written as compressed audio and uploaded to S3-compatible storage (e.g., Backblaze B2).
 
 **Key environment variables**
-- `AUDIO_VOICES_DIR` (default `/runpod-volume/echo-tts/audio_voices`): directory containing reference audio files (`.wav/.mp3/.m4a/.ogg/.flac/.webm/.aac/.opus`). Pass `speaker_voice: "<filename>"` in requests.
-- `OUTPUT_AUDIO_DIR` (default `/runpod-volume/echo-tts/output_audio`): temp dir for generated audio before upload.
+- `AUDIO_VOICES_DIR` (default `/runpod-volume/echo-tts/audio_voices`; override if you mount elsewhere): directory containing reference audio files (`.wav/.mp3/.m4a/.ogg/.flac/.webm/.aac/.opus`). Pass `speaker_voice: "<filename>"` in requests.
+- `OUTPUT_AUDIO_DIR` (default `/runpod-volume/echo-tts/output_audio`; override if you mount elsewhere): temp dir for generated audio before upload.
 - `S3_ENDPOINT_URL`: S3-compatible endpoint (e.g., Backblaze B2).
 - `S3_ACCESS_KEY_ID`: S3 access key.
 - `S3_SECRET_ACCESS_KEY`: S3 secret.
@@ -239,6 +239,65 @@ The serverless path uses `handler.py` to warm up models and serve requests. Refe
 - `url`: presigned URL for download.
 - `s3_key`: object key in the bucket.
 - `metadata`: sample_rate, duration, seed.
+
+**Deploying to RunPod (critical settings)**
+- Build & push an amd64 image: `docker build --platform linux/amd64 -t <registry>/<repo>:echo-tts . && docker push <registry>/<repo>:echo-tts`
+- In the RunPod endpoint config:
+  - **Container Image**: the pushed tag above
+  - **Container Disk**: set to **>= 30 GB** (CUDA base image + venv + cache on OS disk)
+  - **Endpoint Type**: Queue (serverless worker)
+  - **Command/Args**: leave blank (uses `CMD ["bash", "/workspace/echo-tts/bootstrap.sh"]`), or set explicitly to `python /workspace/echo-tts/handler.py --rp_serve_api`
+  - **GPU**: any CUDA 12–compatible GPU (e.g., A10, L4, etc.)
+  - **Env vars**: `HF_TOKEN`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION` (default `us-east-1`), `AUDIO_VOICES_DIR` (default `/runpod-volume/echo-tts/audio_voices`), `OUTPUT_AUDIO_DIR` (default `/runpod-volume/echo-tts/output_audio`)
+
+**Client examples (RunPod API)**
+- Synchronous run with Bearer token:
+```bash
+ENDPOINT_ID=<your-endpoint-id>
+RUNPOD_API_KEY=<your-runpod-api-key>
+
+curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -d '{
+    "input": {
+      "text": "Hello from Echo-TTS on RunPod.",
+      "speaker_voice": "EARS p004 freeform.mp3",
+      "parameters": {
+        "num_steps": 40,
+        "cfg_scale_text": 3.0,
+        "cfg_scale_speaker": 8.0,
+        "seed": 1234
+      }
+    }
+  }'
+# Response (truncated): {"id":"...","status":"COMPLETED","output":{"status":"completed","filename":"...","url":"...","s3_key":"...","metadata":{...}}}
+```
+
+- Async run + poll:
+```bash
+REQUEST_ID=$(curl -s -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/run" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -d '{"input": {"text": "Async test"}}' | jq -r '.id')
+
+curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/status/${REQUEST_ID}" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}"
+```
+
+- Python snippet:
+```python
+import os, requests
+
+endpoint_id = os.environ["ENDPOINT_ID"]
+api_key = os.environ["RUNPOD_API_KEY"]
+url = f"https://api.runpod.ai/v2/{endpoint_id}/runsync"
+payload = {"input": {"text": "Python client call", "speaker_voice": None}}
+
+r = requests.post(url, json=payload, headers={"Authorization": f"Bearer {api_key}"})
+r.raise_for_status()
+print(r.json()["output"]["url"])
+```
 
 ## ⚠️ Responsible Use
 
