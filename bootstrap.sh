@@ -41,67 +41,68 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Check if already installed
+INSTALLED=false
 if [ -f "$FLAG_FILE" ]; then
-    log "Echo-TTS already installed. Skipping bootstrap."
+    INSTALLED=true
+    log "Echo-TTS already installed. Reusing existing environment."
     log "To force reinstall, delete: $FLAG_FILE"
-    exit 0
 fi
-
-log "Starting fresh installation..."
 
 # Create install directory (already ensured for logging)
 cd "$INSTALL_DIR"
 
-# Clone remote repository
-log "Cloning Echo-TTS repository from $REMOTE_REPO_URL..."
-git clone "$REMOTE_REPO_URL" "$REMOTE_DIR"
-cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
-mkdir -p "$AUDIO_VOICES_DIR"
-mkdir -p "$OUTPUT_AUDIO_DIR"
+if [ "$INSTALLED" = false ]; then
+    log "Starting fresh installation..."
 
-# Remove gradio from requirements.txt
-log "Removing gradio from requirements.txt..."
-if [ -f "$REMOTE_DIR/requirements.txt" ]; then
-    sed -i '/gradio/d' "$REMOTE_DIR/requirements.txt"
-    log "Updated requirements.txt (removed gradio)"
-else
-    log "Warning: requirements.txt not found in remote repo"
-fi
+    # Clone remote repository
+    log "Cloning Echo-TTS repository from $REMOTE_REPO_URL..."
+    git clone "$REMOTE_REPO_URL" "$REMOTE_DIR"
+    cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
+    mkdir -p "$AUDIO_VOICES_DIR"
+    mkdir -p "$OUTPUT_AUDIO_DIR"
 
-# Create virtual environment
-log "Creating Python virtual environment..."
-python3.12 -m venv "$VENV_DIR"
+    # Remove gradio from requirements.txt
+    log "Removing gradio from requirements.txt..."
+    if [ -f "$REMOTE_DIR/requirements.txt" ]; then
+        sed -i '/gradio/d' "$REMOTE_DIR/requirements.txt"
+        log "Updated requirements.txt (removed gradio)"
+    else
+        log "Warning: requirements.txt not found in remote repo"
+    fi
 
-# Activate virtual environment
-log "Activating virtual environment..."
-source "$VENV_DIR/bin/activate"
+    # Create virtual environment
+    log "Creating Python virtual environment..."
+    python3.12 -m venv "$VENV_DIR"
 
-# Install dependencies
-log "Installing Python dependencies..."
-if [ -f "$REMOTE_DIR/requirements.txt" ]; then
-    # Add huggingface-hub to requirements
-    echo "huggingface-hub" >> "$REMOTE_DIR/requirements.txt"
+    # Activate virtual environment
+    log "Activating virtual environment..."
+    source "$VENV_DIR/bin/activate"
 
-    # Install requirements
-    pip install -r "$REMOTE_DIR/requirements.txt"
-    log "Dependencies installed successfully"
-else
-    log "Installing minimal dependencies..."
-    pip install torch torchaudio huggingface-hub safetensors numpy einops fastapi uvicorn
-fi
+    # Install dependencies
+    log "Installing Python dependencies..."
+    if [ -f "$REMOTE_DIR/requirements.txt" ]; then
+        # Add huggingface-hub to requirements
+        echo "huggingface-hub" >> "$REMOTE_DIR/requirements.txt"
 
-# Install additional serverless dependencies
-log "Installing serverless-specific dependencies..."
-pip install runpod fastapi uvicorn[standard] pydantic python-multipart tqdm boto3
+        # Install requirements
+        pip install -r "$REMOTE_DIR/requirements.txt"
+        log "Dependencies installed successfully"
+    else
+        log "Installing minimal dependencies..."
+        pip install torch torchaudio huggingface-hub safetensors numpy einops fastapi uvicorn
+    fi
 
-# Pre-download models using inference helpers (will also cache weights)
-log "Downloading Echo-TTS models via inference helpers..."
-mkdir -p "$MODELS_DIR"
+    # Install additional serverless dependencies
+    log "Installing serverless-specific dependencies..."
+    pip install runpod fastapi uvicorn[standard] pydantic python-multipart tqdm boto3
+
+    # Pre-download models using inference helpers (will also cache weights)
+    log "Downloading Echo-TTS models via inference helpers..."
+    mkdir -p "$MODELS_DIR"
 export HF_HOME="$MODELS_DIR/hf-cache"
 export HF_HUB_CACHE="$MODELS_DIR/hf-cache"
 export PYTHONPATH="$REMOTE_DIR:$PYTHONPATH"
-python3 - << 'PY'
+    python3 - << 'PY'
 import os
 from inference import load_model_from_hf, load_fish_ae_from_hf, load_pca_state_from_hf
 
@@ -120,15 +121,28 @@ load_pca_state_from_hf(device="cpu", token=hf_token)
 print("Model downloads completed")
 PY
 
+    # Create installation flag file
+    log "Marking installation complete..."
+    touch "$FLAG_FILE"
+    log "Created installation flag: $FLAG_FILE"
+else
+    # Reuse existing install; ensure virtualenv exists
+    if [ ! -d "$VENV_DIR" ]; then
+        log "ERROR: Venv missing despite install flag. Delete $FLAG_FILE to reinstall."
+        exit 1
+    fi
+
+    # Ensure directories exist when reusing
+    mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR" "$MODELS_DIR"
+fi
+
+# Activate virtual environment (for both fresh and reuse)
+log "Activating virtual environment..."
+source "$VENV_DIR/bin/activate"
+
 # Optional warmup (non-fatal if it fails)
 log "Running optional handler warmup..."
 python "$SRC/handler.py" --warmup || true
-
-# Create installation flag file
-log "Marking installation complete..."
-mkdir -p "$(dirname "$FLAG_FILE")"
-touch "$FLAG_FILE"
-log "Created installation flag: $FLAG_FILE"
 
 # Start handler (runpod serverless mode)
 log "Starting RunPod handler..."

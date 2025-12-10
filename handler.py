@@ -188,8 +188,10 @@ def handler(job: Dict) -> Dict:
     """RunPod serverless handler."""
     try:
         job_input = job.get("input", {})
+        print(f"[handler] received job_id={job.get('id')} keys={list(job_input.keys())}", flush=True)
         return _synthesize(job_input)
     except Exception as e:  # noqa: BLE001
+        print(f"[handler] error job_id={job.get('id')}: {e}", flush=True)
         return {"status": "error", "error": str(e)}
 
 
