@@ -58,10 +58,6 @@ else
     log "Cloning Echo-TTS repository from $REMOTE_REPO_URL..."
     git clone "$REMOTE_REPO_URL" "$REMOTE_DIR"
 
-    # Copy handler from local source
-    log "Copying handler.py from local source..."
-    cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
-
     # Remove gradio from requirements.txt
     log "Removing gradio from requirements.txt..."
     if [ -f "$REMOTE_DIR/requirements.txt" ]; then
@@ -127,6 +123,10 @@ PY
     touch "$FLAG_FILE"
     log "Installation complete"
 fi
+
+# Always copy latest handler.py from container image (for both fresh install and reuse)
+log "Copying latest handler.py from local source..."
+cp "$LOCAL_SRC_DIR/handler.py" "$REMOTE_DIR/handler.py"
 
 # Ensure required directories exist (for both fresh install and reuse)
 log "Ensuring required directories exist..."
