@@ -205,7 +205,7 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
     text = job_input.get("text")
     if not text or not isinstance(text, str):
         log.error("Missing or invalid 'text' field", request_id=request_id)
-        return {"status": "error", "error": "Missing or invalid 'text' (expected string)."}
+        return {"error": "Missing or invalid 'text' (expected string)."}
 
     log.info(f"Text length: {len(text)} characters", request_id=request_id)
 
@@ -236,13 +236,13 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
                 candidate_path = (AUDIO_VOICES_DIR / speaker_voice_name).resolve()
                 if not str(candidate_path).startswith(str(AUDIO_VOICES_DIR.resolve())):
                     log.error("Invalid speaker_voice path (path traversal attempt)", request_id=request_id)
-                    return {"status": "error", "error": "Invalid speaker_voice path."}
+                    return {"error": "Invalid speaker_voice path."}
                 if not candidate_path.exists():
                     log.error(f"Speaker voice file not found: {speaker_voice_name}", request_id=request_id)
-                    return {"status": "error", "error": f"speaker_voice '{speaker_voice_name}' not found."}
+                    return {"error": f"speaker_voice '{speaker_voice_name}' not found."}
                 if candidate_path.suffix.lower() not in AUDIO_EXTS:
                     log.error(f"Unsupported speaker_voice extension: {candidate_path.suffix}", request_id=request_id)
-                    return {"status": "error", "error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
+                    return {"error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
 
                 speaker_audio = load_audio(str(candidate_path)).to(model.device)
                 log.info(f"Speaker audio loaded: shape={speaker_audio.shape}", request_id=request_id)
@@ -250,7 +250,7 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
                 error_trace = traceback.format_exc()
                 log.error(f"Failed to load speaker_voice: {str(e)}", request_id=request_id)
                 log.debug(f"Traceback:\n{error_trace}", request_id=request_id)
-                return {"status": "error", "error": f"Failed to load speaker_voice: {e}"}
+                return {"error": f"Failed to load speaker_voice: {e}"}
         else:
             log.info("No speaker voice specified, using default", request_id=request_id)
 
@@ -305,7 +305,6 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
         log.error(f"Synthesis failed: {str(e)}", request_id=request_id)
         log.error(f"Traceback:\n{error_trace}", request_id=request_id)
         return {
-            "status": "error",
             "error": str(e),
             "error_type": type(e).__name__,
             "traceback": error_trace
@@ -324,8 +323,8 @@ def handler(job: Dict) -> Dict:
         result = _synthesize(job_input, job_id)
 
         # Wrap result in proper RunPod format
-        if result.get("status") == "error":
-            # Return errors directly (RunPod handles error format)
+        if "error" in result:
+            # Return errors directly (RunPod expects {"error": "message"} format)
             log.error(f"Job failed with error: {result.get('error')}", request_id=job_id)
             return result
         else:
@@ -339,7 +338,6 @@ def handler(job: Dict) -> Dict:
         log.error(f"Handler exception: {str(e)}", request_id=job_id)
         log.error(f"Traceback:\n{error_trace}", request_id=job_id)
         return {
-            "status": "error",
             "error": str(e),
             "error_type": type(e).__name__,
             "traceback": error_trace
