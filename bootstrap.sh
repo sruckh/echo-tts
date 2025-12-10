@@ -124,6 +124,12 @@ PY
 log "Running optional handler warmup..."
 python "$SRC/handler.py" --warmup || true
 
+# Create installation flag file
+log "Marking installation complete..."
+mkdir -p "$(dirname "$FLAG_FILE")"
+touch "$FLAG_FILE"
+log "Created installation flag: $FLAG_FILE"
+
 # Start handler (runpod serverless mode)
 log "Starting RunPod handler..."
 exec python "$SRC/handler.py" --rp_serve_api
