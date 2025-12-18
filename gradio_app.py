@@ -29,11 +29,6 @@ from inference import (
     sample_euler_cfg_independent_guidances
 )
 
-try:
-    from inference import sample_pipeline_chunked  # type: ignore
-except ImportError:
-    sample_pipeline_chunked = None  # type: ignore
-
 # --------------------------------------------------------------------
 # IF ON 8GB VRAM GPU, SET FISH_AE_DTYPE to bfloat16 and DEFAULT_SAMPLE_LATENT_LENGTH to < 640 (e.g., 576)
 
@@ -268,47 +263,18 @@ def generate_audio(
         sequence_length=sample_latent_length_val,
     )
 
-    if sample_pipeline_chunked is not None:
-        try:
-            audio_out, normalized_text = sample_pipeline_chunked(
-                model=active_model,
-                fish_ae=active_fish_ae,
-                pca_state=pca_state,
-                sample_fn=sample_fn,
-                text_prompt=text_prompt,
-                speaker_audio=speaker_audio,
-                rng_seed=rng_seed_int,
-                pad_to_max_text_length=pad_to_max_text_length,
-                pad_to_max_speaker_latent_length=pad_to_max_speaker_latent_length,
-                normalize_text=True,
-                max_chars_per_chunk=300,
-            )
-        except TypeError:
-            audio_out, normalized_text = sample_pipeline(
-                model=active_model,
-                fish_ae=active_fish_ae,
-                pca_state=pca_state,
-                sample_fn=sample_fn,
-                text_prompt=text_prompt,
-                speaker_audio=speaker_audio,
-                rng_seed=rng_seed_int,
-                pad_to_max_text_length=pad_to_max_text_length,
-                pad_to_max_speaker_latent_length=pad_to_max_speaker_latent_length,
-                normalize_text=True,
-            )
-    else:
-        audio_out, normalized_text = sample_pipeline(
-            model=active_model,
-            fish_ae=active_fish_ae,
-            pca_state=pca_state,
-            sample_fn=sample_fn,
-            text_prompt=text_prompt,
-            speaker_audio=speaker_audio,
-            rng_seed=rng_seed_int,
-            pad_to_max_text_length=pad_to_max_text_length,
-            pad_to_max_speaker_latent_length=pad_to_max_speaker_latent_length,
-            normalize_text=True,
-        )
+    audio_out, normalized_text = sample_pipeline(
+        model=active_model,
+        fish_ae=active_fish_ae,
+        pca_state=pca_state,
+        sample_fn=sample_fn,
+        text_prompt=text_prompt,
+        speaker_audio=speaker_audio,
+        rng_seed=rng_seed_int,
+        pad_to_max_text_length=pad_to_max_text_length,
+        pad_to_max_speaker_latent_length=pad_to_max_speaker_latent_length,
+        normalize_text=True,
+    )
 
     audio_to_save = audio_out[0].cpu()
 
