@@ -23,7 +23,7 @@ from inference import (
     load_pca_state_from_hf,
     load_audio,
     ae_reconstruct,
-    sample_pipeline,
+    sample_pipeline_chunked,
     compile_model,
     compile_fish_ae,
     sample_euler_cfg_independent_guidances
@@ -263,7 +263,7 @@ def generate_audio(
         sequence_length=sample_latent_length_val,
     )
 
-    audio_out, normalized_text = sample_pipeline(
+    audio_out, normalized_text = sample_pipeline_chunked(
         model=active_model,
         fish_ae=active_fish_ae,
         pca_state=pca_state,
@@ -274,6 +274,7 @@ def generate_audio(
         pad_to_max_text_length=pad_to_max_text_length,
         pad_to_max_speaker_latent_length=pad_to_max_speaker_latent_length,
         normalize_text=True,
+        max_chars_per_chunk=300,
     )
 
     audio_to_save = audio_out[0].cpu()

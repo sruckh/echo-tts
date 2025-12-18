@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Callable, List, Tuple
+import re
 
 from huggingface_hub import hf_hub_download
 import safetensors.torch as st
@@ -133,6 +134,60 @@ def tokenizer_encode(text: str, append_bos: bool = True, normalize: bool = True,
         return torch.tensor(b), text
 
     return torch.tensor(b)
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+def chunk_text(text: str, max_chars: int = 300) -> List[str]:
+    """
+    Split input text into <= max_chars character chunks, preferring sentence/clause/word boundaries.
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be > 0")
+
+    text = _WHITESPACE_RE.sub(" ", (text or "")).strip()
+    if not text:
+        return []
+
+    if len(text) <= max_chars:
+        return [text]
+
+    sentence_enders = {".", "!", "?"}
+    clause_enders = {",", ";", ":"}
+    closers = {'"', "'", ")", "]", "}", "”", "’"}
+
+    chunks: List[str] = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+
+        window = remaining[: max_chars + 1]
+        candidate_sentence = None
+        candidate_clause = None
+        candidate_space = None
+
+        for i in range(1, len(window)):
+            if not window[i].isspace():
+                continue
+
+            candidate_space = i
+            prev = window[i - 1]
+            prev2 = window[i - 2] if i >= 2 else ""
+
+            if prev in sentence_enders or (prev in closers and prev2 in sentence_enders):
+                candidate_sentence = i
+            elif prev in clause_enders or (prev in closers and prev2 in clause_enders):
+                candidate_clause = i
+
+        split_at = candidate_sentence or candidate_clause or candidate_space or max_chars
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        remaining = remaining[split_at:].strip()
+
+    return chunks
 
 def get_text_input_ids_and_mask(text_arr: List[str], max_length: int | None, device: str | None = None, normalize: bool = True, return_normalized_text: bool = False, pad_to_max: bool = True) -> Tuple[torch.Tensor, torch.Tensor] | Tuple[torch.Tensor, torch.Tensor, List[str]]:
     encoded_texts = [tokenizer_encode(text, normalize=normalize, return_normalized_text=True) for text in text_arr]
@@ -290,6 +345,47 @@ def sample_pipeline(
     audio_out = crop_audio_to_flattening_point(audio_out, latent_out[0])
 
     return audio_out, normalized_text[0]
+
+@torch.inference_mode()
+def sample_pipeline_chunked(
+    model: EchoDiT,
+    fish_ae: DAC,
+    pca_state: PCAState,
+    sample_fn: SampleFn,
+    text_prompt: str,
+    speaker_audio: torch.Tensor | None,
+    rng_seed: int,
+    *,
+    max_chars_per_chunk: int = 300,
+    pad_to_max_speaker_latent_length: int | None = None,
+    pad_to_max_text_length: int | None = None,
+    normalize_text: bool = True,
+) -> Tuple[torch.Tensor, str]:
+    chunks = chunk_text(text_prompt, max_chars=max_chars_per_chunk)
+    if not chunks:
+        raise ValueError("text_prompt is empty after normalization")
+
+    audio_chunks: List[torch.Tensor] = []
+    normalized_chunks: List[str] = []
+
+    for idx, chunk in enumerate(chunks):
+        audio_out, normalized_text = sample_pipeline(
+            model=model,
+            fish_ae=fish_ae,
+            pca_state=pca_state,
+            sample_fn=sample_fn,
+            text_prompt=chunk,
+            speaker_audio=speaker_audio,
+            rng_seed=rng_seed + idx,
+            pad_to_max_speaker_latent_length=pad_to_max_speaker_latent_length,
+            pad_to_max_text_length=pad_to_max_text_length,
+            normalize_text=normalize_text,
+        )
+        audio_chunks.append(audio_out)
+        normalized_chunks.append(normalized_text)
+
+    audio_concat = torch.cat(audio_chunks, dim=-1)
+    return audio_concat, "\n".join(normalized_chunks)
 
 
 

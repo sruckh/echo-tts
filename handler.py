@@ -34,7 +34,7 @@ from inference import (
     load_fish_ae_from_hf,
     load_pca_state_from_hf,
     load_audio,
-    sample_pipeline,
+    sample_pipeline_chunked,
     sample_euler_cfg_independent_guidances,
 )
 
@@ -485,7 +485,7 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
             speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
         # Generate audio
-        audio_out, _ = sample_pipeline(
+        audio_out, _ = sample_pipeline_chunked(
             model=model,
             fish_ae=fish_ae,
             pca_state=pca_state,
@@ -493,6 +493,7 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
             text_prompt=text,
             speaker_audio=speaker_audio,
             rng_seed=seed,
+            max_chars_per_chunk=300,
         )
 
         # Validate output
