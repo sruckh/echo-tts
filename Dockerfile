@@ -7,6 +7,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/runpod-volume/echo-tts/models/hf-cache \
     HF_HUB_CACHE=/runpod-volume/echo-tts/models/hf-cache
 
+ARG ECHO_TTS_UPSTREAM_REPO="https://github.com/jordandare/echo-tts.git"
+ARG ECHO_TTS_UPSTREAM_REF="2ed95fc"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.12 python3.12-venv python3.12-dev python3-pip \
     git ca-certificates curl build-essential cmake ninja-build pkg-config ffmpeg \
@@ -14,10 +17,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && ln -sf /usr/bin/python3.12 /usr/local/bin/python \
     && ln -sf /usr/bin/pip3 /usr/local/bin/pip
 
-WORKDIR /workspace/echo-tts
+WORKDIR /opt
 
-# Only copy the minimal bootstrap assets; code is cloned in bootstrap.sh
-COPY bootstrap.sh /workspace/echo-tts/bootstrap.sh
-COPY handler.py /workspace/echo-tts/handler.py
+# Pin upstream echo-tts code at build time to avoid drift with persistent volumes
+RUN git clone "$ECHO_TTS_UPSTREAM_REPO" /opt/echo-tts-remote \
+    && cd /opt/echo-tts-remote \
+    && git checkout "$ECHO_TTS_UPSTREAM_REF" \
+    && sed -i '/gradio/d' requirements.txt \
+    && pip install -r requirements.txt \
+    && pip install runpod==1.6.1 uvicorn[standard] pydantic python-multipart tqdm boto3
 
-CMD ["bash", "/workspace/echo-tts/bootstrap.sh"]
+# Copy serverless handler + bootstrap into image
+COPY handler.py /opt/echo-tts-remote/handler.py
+COPY bootstrap.sh /opt/bootstrap.sh
+
+CMD ["bash", "/opt/bootstrap.sh"]
