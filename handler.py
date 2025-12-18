@@ -34,13 +34,14 @@ from inference import (
     load_fish_ae_from_hf,
     load_pca_state_from_hf,
     load_audio,
+    sample_pipeline,
     sample_euler_cfg_independent_guidances,
 )
 
 try:
-    from inference import sample_pipeline_chunked
-except ImportError:  # Backward compatibility with older deployments
-    from inference import sample_pipeline as sample_pipeline_chunked
+    from inference import sample_pipeline_chunked  # type: ignore
+except ImportError:
+    sample_pipeline_chunked = None  # type: ignore
 
 # Initialize RunPod structured logger
 log = runpod.RunPodLogger()
@@ -488,17 +489,39 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
             speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
-        # Generate audio
-        audio_out, _ = sample_pipeline_chunked(
-            model=model,
-            fish_ae=fish_ae,
-            pca_state=pca_state,
-            sample_fn=sample_fn,
-            text_prompt=text,
-            speaker_audio=speaker_audio,
-            rng_seed=seed,
-            max_chars_per_chunk=300,
-        )
+        # Generate audio (chunking is optional; fall back gracefully if unavailable)
+        if sample_pipeline_chunked is not None:
+            try:
+                audio_out, _ = sample_pipeline_chunked(
+                    model=model,
+                    fish_ae=fish_ae,
+                    pca_state=pca_state,
+                    sample_fn=sample_fn,
+                    text_prompt=text,
+                    speaker_audio=speaker_audio,
+                    rng_seed=seed,
+                    max_chars_per_chunk=300,
+                )
+            except TypeError:
+                audio_out, _ = sample_pipeline(
+                    model=model,
+                    fish_ae=fish_ae,
+                    pca_state=pca_state,
+                    sample_fn=sample_fn,
+                    text_prompt=text,
+                    speaker_audio=speaker_audio,
+                    rng_seed=seed,
+                )
+        else:
+            audio_out, _ = sample_pipeline(
+                model=model,
+                fish_ae=fish_ae,
+                pca_state=pca_state,
+                sample_fn=sample_fn,
+                text_prompt=text,
+                speaker_audio=speaker_audio,
+                rng_seed=seed,
+            )
 
         # Validate output
         if audio_out is None or len(audio_out) == 0:
