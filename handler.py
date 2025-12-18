@@ -34,9 +34,13 @@ from inference import (
     load_fish_ae_from_hf,
     load_pca_state_from_hf,
     load_audio,
-    sample_pipeline_chunked,
     sample_euler_cfg_independent_guidances,
 )
+
+try:
+    from inference import sample_pipeline_chunked
+except ImportError:  # Backward compatibility with older deployments
+    from inference import sample_pipeline as sample_pipeline_chunked
 
 # Initialize RunPod structured logger
 log = runpod.RunPodLogger()

@@ -23,11 +23,15 @@ from inference import (
     load_pca_state_from_hf,
     load_audio,
     ae_reconstruct,
-    sample_pipeline_chunked,
     compile_model,
     compile_fish_ae,
     sample_euler_cfg_independent_guidances
 )
+
+try:
+    from inference import sample_pipeline_chunked
+except ImportError:  # Backward compatibility with older deployments
+    from inference import sample_pipeline as sample_pipeline_chunked
 
 # --------------------------------------------------------------------
 # IF ON 8GB VRAM GPU, SET FISH_AE_DTYPE to bfloat16 and DEFAULT_SAMPLE_LATENT_LENGTH to < 640 (e.g., 576)
