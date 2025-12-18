@@ -5,9 +5,11 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Hugging Face](https://img.shields.io/badge/🤗%20Hugging%20Face-Model-blue.svg)](https://huggingface.co/jordand/echo-tts-base)
 
-> A multi-speaker text-to-speech model with speaker reference conditioning
+> RunPod serverless worker for Echo-TTS inference
 
-Echo-TTS is a state-of-the-art text-to-speech system that generates natural-sounding speech conditioned on both text prompts and optional speaker reference audio. Built on a Diffusion Transformer (DiT) architecture, it supports voice cloning, style transfer, and can generate up to 30 seconds of high-quality audio.
+This repository is the **RunPod serverless inference worker** for Echo-TTS. It runs `handler.py` as a queue-based serverless worker, loads models from Hugging Face, and uploads generated audio to S3-compatible storage.
+
+Core model/inference code is vendored from the upstream Echo-TTS repository at image build time (pinned via `Dockerfile`).
 
 **Model:** [jordand/echo-tts-base](https://huggingface.co/jordand/echo-tts-base) | **Live Demo:** [echo-tts-preview](https://huggingface.co/spaces/jordand/echo-tts-preview) | **Blog Post:** [Technical Details](https://jordandarefsky.com/blog/2025/echo/)
 
@@ -17,9 +19,8 @@ Echo-TTS is a state-of-the-art text-to-speech system that generates natural-soun
 - **🔬 Advanced Architecture**: Diffusion Transformer with rotary position embeddings and low-rank AdaLN adaptation
 - **⚡ High-Quality Output**: Generates 44.1kHz audio with natural prosody and expression
 - **🎛️ Fine Control**: Independent classifier-free guidance for text and speaker conditioning
-- **🔄 Memory Efficient**: Blockwise generation support for streaming and longer audio
-- **🎚️ Force Speaker**: KV scaling to ensure speaker consistency for out-of-distribution text
-- **🌐 Web Interface**: Interactive Gradio UI for easy experimentation
+- **🔄 Long Prompts**: Default text chunking (per-request) for long prompts
+- **☁️ Serverless**: RunPod queue-based worker, S3 uploads, persistent voice directory
 
 ## 🏗️ Architecture
 
@@ -35,84 +36,7 @@ The model uses Fish Speech S1-DAC autoencoder for audio encoding/decoding and su
 
 ## 🚀 Quick Start
 
-### Prerequisites
-
-- Python 3.10 or higher
-- CUDA-capable GPU with at least 8GB VRAM (recommended)
-- Git
-
-### Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/jordand/echo-tts.git
-cd echo-tts
-
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-```
-
-### Web Interface
-
-```bash
-# Launch Gradio UI
-python gradio_app.py
-```
-
-The web interface will be available at `http://localhost:7860`
-
-### Python API
-
-```python
-from inference import (
-    load_model_from_hf,
-    load_fish_ae_from_hf,
-    load_pca_state_from_hf,
-    load_audio,
-    sample_pipeline,
-    sample_euler_cfg_independent_guidances,
-)
-from functools import partial
-import torchaudio
-
-# Load models (downloads from HuggingFace on first run)
-model = load_model_from_hf(delete_blockwise_modules=True)
-fish_ae = load_fish_ae_from_hf()
-pca_state = load_pca_state_from_hf()
-
-# Load speaker reference (optional)
-speaker_audio = load_audio("speaker.wav").cuda()
-
-# Configure sampler
-sample_fn = partial(
-    sample_euler_cfg_independent_guidances,
-    num_steps=40,
-    cfg_scale_text=3.0,
-    cfg_scale_speaker=8.0,
-    cfg_min_t=0.5,
-    cfg_max_t=1.0,
-    sequence_length=640, # ~30 seconds of audio
-)
-
-# Generate speech
-text = "[S1] Hello, this is a test of the Echo TTS model."
-audio_out, _ = sample_pipeline(
-    model=model,
-    fish_ae=fish_ae,
-    pca_state=pca_state,
-    sample_fn=sample_fn,
-    text_prompt=text,
-    speaker_audio=speaker_audio,
-    rng_seed=0,
-)
-
-# Save output
-torchaudio.save("output.wav", audio_out[0].cpu(), 44100)
-```
+This repo is intended to be built and run as a RunPod serverless worker image. For interactive demos or the upstream Python API examples, use the upstream Echo-TTS repository.
 
 ## 📖 Documentation
 
@@ -128,12 +52,7 @@ torchaudio.save("output.wav", audio_out[0].cpu(), 44100)
 
 ### Low VRAM Configuration (8GB)
 
-For GPUs with limited VRAM, edit `gradio_app.py`:
-
-```python
-FISH_AE_DTYPE = torch.bfloat16  # Instead of float32
-DEFAULT_SAMPLE_LATENT_LENGTH = 576  # Reduce from 640
-```
+For low VRAM tuning in upstream demos, refer to upstream Echo-TTS documentation. This repo does not run the Gradio demo.
 
 ### Blockwise Generation
 
@@ -215,7 +134,7 @@ python inference_blockwise.py
 
 ## ☁️ Runpod Serverless (handler-based)
 
-The serverless path uses `handler.py` to warm up models and serve requests. Reference voices come from filenames (no base64) located in a mounted directory, and outputs are written as compressed audio and uploaded to S3-compatible storage (e.g., Backblaze B2).
+The serverless worker runs `handler.py`. Reference voices come from filenames (no base64) located in a mounted directory, and outputs are written as compressed audio and uploaded to S3-compatible storage (e.g., Backblaze B2).
 
 **Key environment variables**
 - `AUDIO_VOICES_DIR` (default `/runpod-volume/echo-tts/audio_voices`; override if you mount elsewhere): directory containing reference audio files (`.wav/.mp3/.m4a/.ogg/.flac/.webm/.aac/.opus`). Pass `speaker_voice: "<filename>"` in requests.
@@ -227,10 +146,15 @@ The serverless path uses `handler.py` to warm up models and serve requests. Refe
 - `S3_REGION` (default `us-east-1`): region name for the client.
 - `HF_TOKEN`: Hugging Face token (required because the model weights are gated).
 
+**RunPod cached models (recommended)**
+- Configure your endpoint’s **Model (optional)** to `jordand/echo-tts-base` so workers are scheduled onto hosts with the model already cached.
+- This worker is configured to use RunPod’s cached-model mount path via `HF_HOME=/runpod-volume/huggingface-cache` and `HF_HUB_CACHE=/runpod-volume/huggingface-cache/hub`.
+
 **Request shape (serverless handler)**
 - `text` (str): text to synthesize.
 - `speaker_voice` (str, optional): filename in `AUDIO_VOICES_DIR`.
-- `parameters` (dict, optional): sampler config (num_steps, cfg_scale_text/speaker, cfg_min_t/cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale, speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed).
+- `parameters` (dict, optional): sampler config (num_steps, cfg_scale_text/speaker, cfg_min_t/cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale, speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed, max_chars_per_chunk).
+  - `max_chars_per_chunk` (int, default `300`): long prompts are split and synthesized chunk-by-chunk, then concatenated. Set to `0` to disable chunking.
 - `session_id` (str, optional): used for output filename; defaults to UUID.
 
 **Response**
@@ -244,9 +168,9 @@ The serverless path uses `handler.py` to warm up models and serve requests. Refe
 - Build & push an amd64 image: `docker build --platform linux/amd64 -t <registry>/<repo>:echo-tts . && docker push <registry>/<repo>:echo-tts`
 - In the RunPod endpoint config:
   - **Container Image**: the pushed tag above
-  - **Container Disk**: set to **>= 30 GB** (CUDA base image + venv + cache on OS disk)
+  - **Container Disk**: set to **>= 30 GB** (CUDA base image + deps)
   - **Endpoint Type**: Queue (serverless worker)
-  - **Command/Args**: leave blank (uses `CMD ["bash", "/workspace/echo-tts/bootstrap.sh"]`), or set explicitly to `python /workspace/echo-tts/handler.py --rp_serve_api`
+  - **Command/Args**: leave blank (uses `CMD ["bash", "/opt/bootstrap.sh"]`)
   - **GPU**: any CUDA 12–compatible GPU (e.g., A10, L4, etc.)
   - **Env vars**: `HF_TOKEN`, `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME`, `S3_REGION` (default `us-east-1`), `AUDIO_VOICES_DIR` (default `/runpod-volume/echo-tts/audio_voices`), `OUTPUT_AUDIO_DIR` (default `/runpod-volume/echo-tts/output_audio`)
 
