@@ -541,11 +541,12 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
             speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
         # Generate audio (chunk long prompts into multiple independent generations, then concatenate)
-        max_chars_per_chunk = parameters.get("max_chars_per_chunk", 0)
+        # Default to chunking for long prompts; allow explicit 0 to disable.
+        max_chars_per_chunk_raw = parameters.get("max_chars_per_chunk", 300)
         try:
-            max_chars_per_chunk = int(max_chars_per_chunk)
+            max_chars_per_chunk = int(max_chars_per_chunk_raw)
         except Exception:
-            max_chars_per_chunk = 0
+            max_chars_per_chunk = 300
 
         if max_chars_per_chunk and max_chars_per_chunk > 0:
             text_chunks = chunk_text(text, max_chars=max_chars_per_chunk)
