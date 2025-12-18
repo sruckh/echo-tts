@@ -15,6 +15,7 @@ Output: uploads compressed audio (OGG) to S3-compatible storage and returns file
 
 import argparse
 import os
+import re
 import sys
 import time
 import traceback
@@ -40,6 +41,61 @@ from inference import (
 
 # Initialize RunPod structured logger
 log = runpod.RunPodLogger()
+
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def chunk_text(text: str, max_chars: int = 300) -> list[str]:
+    """
+    Split input text into <= max_chars character chunks, preferring sentence/clause/word boundaries.
+    """
+    if max_chars <= 0:
+        raise ValueError("max_chars must be > 0")
+
+    normalized = _WHITESPACE_RE.sub(" ", (text or "")).strip()
+    if not normalized:
+        return []
+
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    sentence_enders = {".", "!", "?"}
+    clause_enders = {",", ";", ":"}
+    closers = {'"', "'", ")", "]", "}", "”", "’"}
+
+    chunks: list[str] = []
+    remaining = normalized
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+
+        window = remaining[: max_chars + 1]
+        candidate_sentence: int | None = None
+        candidate_clause: int | None = None
+        candidate_space: int | None = None
+
+        for i in range(1, len(window)):
+            if not window[i].isspace():
+                continue
+
+            candidate_space = i
+            prev = window[i - 1]
+            prev2 = window[i - 2] if i >= 2 else ""
+
+            if prev in sentence_enders or (prev in closers and prev2 in sentence_enders):
+                candidate_sentence = i
+            elif prev in clause_enders or (prev in closers and prev2 in clause_enders):
+                candidate_clause = i
+
+        split_at = candidate_sentence or candidate_clause or candidate_space or max_chars
+        chunk = remaining[:split_at].strip()
+        if chunk:
+            chunks.append(chunk)
+
+        remaining = remaining[split_at:].strip()
+
+    return chunks
 
 # Environment Configuration and Validation
 class Config:
@@ -484,16 +540,35 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
             speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
-        # Generate audio
-        audio_out, _ = sample_pipeline(
-            model=model,
-            fish_ae=fish_ae,
-            pca_state=pca_state,
-            sample_fn=sample_fn,
-            text_prompt=text,
-            speaker_audio=speaker_audio,
-            rng_seed=seed,
-        )
+        # Generate audio (chunk long prompts into multiple independent generations, then concatenate)
+        max_chars_per_chunk = parameters.get("max_chars_per_chunk", 0)
+        try:
+            max_chars_per_chunk = int(max_chars_per_chunk)
+        except Exception:
+            max_chars_per_chunk = 0
+
+        if max_chars_per_chunk and max_chars_per_chunk > 0:
+            text_chunks = chunk_text(text, max_chars=max_chars_per_chunk)
+        else:
+            text_chunks = [text]
+
+        if not text_chunks:
+            return {"error": "Text is empty after normalization"}
+
+        audio_chunks: list[torch.Tensor] = []
+        for idx, chunk in enumerate(text_chunks):
+            audio_chunk, _ = sample_pipeline(
+                model=model,
+                fish_ae=fish_ae,
+                pca_state=pca_state,
+                sample_fn=sample_fn,
+                text_prompt=chunk,
+                speaker_audio=speaker_audio,
+                rng_seed=seed + idx,
+            )
+            audio_chunks.append(audio_chunk)
+
+        audio_out = torch.cat(audio_chunks, dim=-1)
 
         # Validate output
         if audio_out is None or len(audio_out) == 0:
