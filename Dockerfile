@@ -4,8 +4,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PYTHONUNBUFFERED=1 \
-    HF_HOME=/runpod-volume/echo-tts/models/hf-cache \
-    HF_HUB_CACHE=/runpod-volume/echo-tts/models/hf-cache
+    HF_HOME=/runpod-volume/huggingface-cache \
+    HF_HUB_CACHE=/runpod-volume/huggingface-cache/hub
 
 ARG ECHO_TTS_UPSTREAM_REPO="https://github.com/jordandare/echo-tts.git"
 ARG ECHO_TTS_UPSTREAM_REF="2ed95fc"
