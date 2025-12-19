@@ -36,7 +36,6 @@ from inference import (
     load_pca_state_from_hf,
     load_audio,
     sample_pipeline,
-    sample_pipeline_chunked,
     sample_euler_cfg_independent_guidances,
 )
 
