@@ -242,11 +242,13 @@ def normalize_chunk_boundaries(audio_chunks: list[torch.Tensor],
             elif trailing_silence < min_silence_samples and trailing_silence > 0:
                 # Extend to minimum silence
                 additional_silence = min_silence_samples - trailing_silence
-                silence = torch.zeros(chunk.shape[0], additional_silence, device=chunk.device)
+                # Create silence with same dimensionality as chunk
+                silence = torch.zeros(*chunk.shape[:-1], additional_silence, device=chunk.device)
                 chunk = torch.cat([chunk, silence], dim=-1)
             elif trailing_silence == 0:
                 # Add minimum silence if none found
-                silence = torch.zeros(chunk.shape[0], min_silence_samples, device=chunk.device)
+                # Create silence with same dimensionality as chunk
+                silence = torch.zeros(*chunk.shape[:-1], min_silence_samples, device=chunk.device)
                 chunk = torch.cat([chunk, silence], dim=-1)
 
         normalized_chunks.append(chunk)
