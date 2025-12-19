@@ -17,7 +17,8 @@ Core model/inference code is vendored from the upstream Echo-TTS repository at i
 
 - **🎯 Multi-Speaker Generation**: Condition on reference audio for voice cloning or use no reference for default voice
 - **🔬 Advanced Architecture**: Diffusion Transformer with rotary position embeddings and low-rank AdaLN adaptation
-- **⚡ High-Quality Output**: Generates 44.1kHz audio with natural prosody and expression
+- **⚡ High-Quality Output**: Generates natural prosody and expression, output as 24kHz Opus (128k bitrate)
+- **📱 Universal Compatibility**: OGG/Opus format works with WhatsApp, Telegram, modern browsers, and most platforms
 - **🎛️ Fine Control**: Independent classifier-free guidance for text and speaker conditioning
 - **🔄 Long Prompts**: Default text chunking (per-request) for long prompts
 - **☁️ Serverless**: RunPod queue-based worker, S3 uploads, persistent voice directory
@@ -191,10 +192,10 @@ The serverless worker runs `handler.py`. Reference voices come from filenames (n
 
 **Response**
 - `status`: `completed` or `error`.
-- `filename`: generated audio filename (OGG).
+- `filename`: generated audio filename (OGG/Opus).
 - `url`: presigned URL for download.
 - `s3_key`: object key in the bucket.
-- `metadata`: sample_rate, duration, seed.
+- `metadata`: sample_rate (24kHz), codec (opus), bitrate (128k), duration, seed.
 
 **Deploying to RunPod (critical settings)**
 - Build & push an amd64 image: `docker build --platform linux/amd64 -t <registry>/<repo>:echo-tts . && docker push <registry>/<repo>:echo-tts`

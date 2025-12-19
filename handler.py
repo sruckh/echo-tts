@@ -16,6 +16,7 @@ Output: uploads compressed audio (OGG) to S3-compatible storage and returns file
 import argparse
 import os
 import re
+import subprocess
 import sys
 import time
 import traceback
@@ -479,7 +480,7 @@ def _get_s3_client():
 
 
 def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session_id: str, request_id: Optional[str] = None) -> Dict[str, str]:
-    """Save audio to OGG (Vorbis) and upload to S3-compatible storage."""
+    """Save audio to OGG (Opus) at 24kHz and upload to S3-compatible storage."""
     log.info(f"Saving and uploading audio for session: {session_id}", request_id=request_id)
 
     # Ensure output directory exists
@@ -487,11 +488,14 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
     filename = f"{session_id}.ogg"
     key = f"{filename}"
 
-    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-        tmp_path = tmp.name
+    # Create temporary files for WAV (intermediate) and OGG (final)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+        tmp_wav_path = tmp_wav.name
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_ogg:
+        tmp_ogg_path = tmp_ogg.name
 
     try:
-        log.debug(f"Saving audio to temporary file: {tmp_path}", request_id=request_id)
+        log.debug(f"Saving audio to temporary WAV file: {tmp_wav_path}", request_id=request_id)
 
         # Validate audio tensor
         if audio_tensor is None:
@@ -501,25 +505,55 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
 
         log.debug(f"Audio tensor shape: {audio_tensor.shape}, sample_rate: {sample_rate}", request_id=request_id)
 
+        # Save as WAV first (lossless intermediate format)
         try:
-            torchaudio.save(tmp_path, audio_tensor, sample_rate)
-            log.debug(f"Audio saved successfully to: {tmp_path}", request_id=request_id)
+            torchaudio.save(tmp_wav_path, audio_tensor, sample_rate)
+            log.debug(f"Audio saved successfully to WAV: {tmp_wav_path}", request_id=request_id)
         except Exception as save_error:
             error_msg = f"Failed to save audio file: {str(save_error)}"
             log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
-        # Read the saved file
+        # Convert to OGG Opus at 24kHz with 128k bitrate using ffmpeg
         try:
-            with open(tmp_path, "rb") as f:
+            ffmpeg_cmd = [
+                "ffmpeg",
+                "-i", tmp_wav_path,
+                "-ar", "24000",           # Resample to 24kHz
+                "-c:a", "libopus",        # Opus codec
+                "-b:a", "128k",           # 128k bitrate
+                "-vbr", "on",             # Variable bitrate
+                "-compression_level", "10", # Maximum compression efficiency
+                "-y",                     # Overwrite output file
+                tmp_ogg_path
+            ]
+            result = subprocess.run(
+                ffmpeg_cmd,
+                capture_output=True,
+                text=True,
+                check=True
+            )
+            log.debug(f"Audio converted to Opus successfully: {tmp_ogg_path}", request_id=request_id)
+        except subprocess.CalledProcessError as ffmpeg_error:
+            error_msg = f"FFmpeg conversion failed: {ffmpeg_error.stderr}"
+            log.error(error_msg, request_id=request_id)
+            raise RuntimeError(error_msg)
+        except Exception as convert_error:
+            error_msg = f"Failed to convert audio: {str(convert_error)}"
+            log.error(error_msg, request_id=request_id)
+            raise RuntimeError(error_msg)
+
+        # Read the converted Opus file
+        try:
+            with open(tmp_ogg_path, "rb") as f:
                 data = f.read()
         except Exception as read_error:
-            error_msg = f"Failed to read saved audio file: {str(read_error)}"
+            error_msg = f"Failed to read converted audio file: {str(read_error)}"
             log.error(error_msg, request_id=request_id)
             raise RuntimeError(error_msg)
 
         file_size_mb = len(data) / (1024 * 1024)
-        log.info(f"Audio file size: {file_size_mb:.2f}MB", request_id=request_id)
+        log.info(f"Audio file size (Opus 24kHz 128k): {file_size_mb:.2f}MB", request_id=request_id)
 
         if file_size_mb > 50:  # Warn if file is very large
             log.warning(f"Large audio file: {file_size_mb:.2f}MB", request_id=request_id)
@@ -532,7 +566,7 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
                 Bucket=config.S3_BUCKET_NAME,
                 Key=key,
                 Body=data,
-                ContentType="audio/ogg",
+                ContentType="audio/ogg; codecs=opus",
             )
             log.debug(f"Successfully uploaded to S3: {key}", request_id=request_id)
         except Exception as upload_error:
@@ -562,12 +596,14 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
         raise
 
     finally:
-        # Clean up temporary file
-        try:
-            os.unlink(tmp_path)
-            log.debug(f"Cleaned up temporary file: {tmp_path}", request_id=request_id)
-        except OSError as cleanup_error:
-            log.warning(f"Failed to clean up temporary file {tmp_path}: {cleanup_error}", request_id=request_id)
+        # Clean up temporary files
+        for tmp_file in [tmp_wav_path, tmp_ogg_path]:
+            try:
+                if os.path.exists(tmp_file):
+                    os.unlink(tmp_file)
+                    log.debug(f"Cleaned up temporary file: {tmp_file}", request_id=request_id)
+            except OSError as cleanup_error:
+                log.warning(f"Failed to clean up temporary file {tmp_file}: {cleanup_error}", request_id=request_id)
 
 
 def health_check(request_id: Optional[str] = None) -> Dict:
@@ -735,8 +771,11 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
         if audio_out is None or len(audio_out) == 0:
             return {"error": "No audio generated"}
 
+        # Duration is calculated from original audio (sample rate doesn't affect duration)
         duration_seconds = len(audio_out[0]) / 44_100
         session_id = job_input.get("session_id") or str(uuid4())
+
+        # Save and upload (will be resampled to 24kHz Opus internally)
         upload_meta = _save_and_upload_audio(audio_out[0].cpu(), 44_100, session_id)
 
         result = {
@@ -745,7 +784,9 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
             "url": upload_meta["url"],
             "s3_key": upload_meta["key"],
             "metadata": {
-                "sample_rate": 44_100,
+                "sample_rate": 24_000,  # Output is resampled to 24kHz
+                "codec": "opus",
+                "bitrate": "128k",
                 "duration": duration_seconds,
                 "seed": seed,
                 "device": config.device,
