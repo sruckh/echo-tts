@@ -54,6 +54,35 @@ This repo is intended to be built and run as a RunPod serverless worker image. F
 
 For low VRAM tuning in upstream demos, refer to upstream Echo-TTS documentation. This repo does not run the Gradio demo.
 
+### Improved Chunking Strategy
+
+The serverless handler includes enhanced chunking to reduce audio artifacts:
+
+**Features:**
+- **Audio-aware chunking**: Splits text based on both character count and estimated audio duration (~12 chars/second)
+- **Cross-fading**: Overlaps adjacent chunks with smooth transitions (100ms default) to eliminate clicks and pops
+- **Boundary normalization**: Ensures consistent silence between chunks and removes excessive trailing silence
+- **Deterministic seeding**: Uses spaced seeds for better audio continuity between chunks
+
+**Example request with improved chunking:**
+```bash
+curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -d '{
+    "input": {
+      "text": "This is a long text that will be split into multiple chunks and processed with cross-fading to ensure smooth audio transitions between segments.",
+      "parameters": {
+        "max_chars_per_chunk": 300,
+        "enable_crossfade": true,
+        "normalize_boundaries": true,
+        "target_duration_seconds": 10.0,
+        "seed": 1234
+      }
+    }
+  }'
+```
+
 ### Blockwise Generation
 
 For streaming applications or longer audio, use `inference_blockwise.py`:
@@ -153,8 +182,11 @@ The serverless worker runs `handler.py`. Reference voices come from filenames (n
 **Request shape (serverless handler)**
 - `text` (str): text to synthesize.
 - `speaker_voice` (str, optional): filename in `AUDIO_VOICES_DIR`.
-- `parameters` (dict, optional): sampler config (num_steps, cfg_scale_text/speaker, cfg_min_t/cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale, speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed, max_chars_per_chunk).
+- `parameters` (dict, optional): sampler config (num_steps, cfg_scale_text/speaker, cfg_min_t/cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale, speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed, max_chars_per_chunk, enable_crossfade, normalize_boundaries, target_duration_seconds).
   - `max_chars_per_chunk` (int, default `300`): long prompts are split and synthesized chunk-by-chunk, then concatenated. Set to `0` to disable chunking.
+  - `enable_crossfade` (bool, default `true`): apply cross-fading between audio chunks for smoother transitions (reduces clicks/pops at boundaries).
+  - `normalize_boundaries` (bool, default `true`): normalize silences at chunk boundaries to reduce artifacts (adds consistent silence, removes trailing silence).
+  - `target_duration_seconds` (float, default `10.0`): target duration per chunk in seconds when audio-aware chunking is enabled.
 - `session_id` (str, optional): used for output filename; defaults to UUID.
 
 **Response**

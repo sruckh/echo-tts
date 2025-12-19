@@ -100,8 +100,10 @@ docker run --gpus all echo-tts
 
 ### Text chunking (serverless)
 
-- `handler.py` chunks long prompts and synthesizes each chunk independently, then concatenates audio.
+- `handler.py` includes enhanced chunking for long prompts with audio boundary processing to reduce artifacts.
+- Features audio-aware chunking, cross-fading between chunks, and silence normalization for smooth transitions.
 - Control with `parameters.max_chars_per_chunk` (default `300`; set `0` to disable).
+- Additional parameters: `enable_crossfade` (default `true`), `normalize_boundaries` (default `true`), `target_duration_seconds` (default `10.0`).
 
 ## Key Configuration Files
 

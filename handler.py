@@ -36,6 +36,7 @@ from inference import (
     load_pca_state_from_hf,
     load_audio,
     sample_pipeline,
+    sample_pipeline_chunked,
     sample_euler_cfg_independent_guidances,
 )
 
@@ -96,6 +97,140 @@ def chunk_text(text: str, max_chars: int = 300) -> list[str]:
         remaining = remaining[split_at:].strip()
 
     return chunks
+
+
+def chunk_text_for_audio(text: str, max_chars: int = 300, target_duration_seconds: float = 10.0) -> list[str]:
+    """Chunk text considering both character limits and estimated audio duration.
+
+    Args:
+        text: Input text to chunk
+        max_chars: Maximum characters per chunk
+        target_duration_seconds: Target duration per chunk in seconds
+
+    Returns:
+        List of text chunks optimized for audio generation
+    """
+    # Rough estimate: ~12 characters per second of speech
+    target_chars = min(max_chars, int(target_duration_seconds * 12))
+
+    chunks = chunk_text(text, max_chars=target_chars)
+
+    # Ensure last chunk isn't too short (minimum 2 seconds)
+    if len(chunks) > 1 and len(chunks[-1]) < 24:
+        chunks[-2] += " " + chunks[-1]
+        chunks.pop()
+
+    return chunks
+
+
+def crossfade_chunks(audio_chunks: list[torch.Tensor], overlap_samples: int = 4410) -> torch.Tensor:
+    """Apply cross-fading between audio chunks for smoother transitions.
+
+    Args:
+        audio_chunks: List of audio tensors to concatenate
+        overlap_samples: Number of samples to overlap (default: 100ms at 44.1kHz)
+
+    Returns:
+        Crossfaded audio tensor
+    """
+    if len(audio_chunks) <= 1:
+        return torch.cat(audio_chunks, dim=-1) if audio_chunks else torch.tensor([])
+
+    result = audio_chunks[0]
+    for i in range(1, len(audio_chunks)):
+        # Ensure minimum length for crossfade
+        chunk_length = audio_chunks[i].shape[-1]
+        prev_length = result.shape[-1]
+
+        # Adjust overlap if chunks are too short
+        actual_overlap = min(overlap_samples, chunk_length // 4, prev_length // 4)
+
+        if actual_overlap > 0:
+            # Create fade windows
+            fade_out = torch.linspace(1, 0, actual_overlap, device=audio_chunks[i].device)
+            fade_in = torch.linspace(0, 1, actual_overlap, device=audio_chunks[i].device)
+
+            # Match dimensions
+            fade_out = fade_out.view(1, -1) if audio_chunks[i].dim() == 2 else fade_out
+            fade_in = fade_in.view(1, -1) if audio_chunks[i].dim() == 2 else fade_in
+
+            # Apply crossfade
+            result = result[..., :-actual_overlap]
+            prev_chunk_end = audio_chunks[i-1][..., -actual_overlap:] * fade_out
+            curr_chunk_start = audio_chunks[i][..., :actual_overlap] * fade_in
+            crossfaded = prev_chunk_end + curr_chunk_start
+
+            result = torch.cat([result, crossfaded, audio_chunks[i][..., actual_overlap:]], dim=-1)
+        else:
+            # No overlap, just concatenate
+            result = torch.cat([result, audio_chunks[i]], dim=-1)
+
+    return result
+
+
+def normalize_chunk_boundaries(audio_chunks: list[torch.Tensor],
+                             sample_rate: int = 44100,
+                             silence_threshold: float = 0.01,
+                             min_silence_samples: int = 22050) -> torch.Tensor:
+    """Normalize silences at chunk boundaries to reduce artifacts.
+
+    Args:
+        audio_chunks: List of audio tensors
+        sample_rate: Audio sample rate
+        silence_threshold: Energy threshold for silence detection
+        min_silence_samples: Minimum silence between chunks (0.5 seconds)
+
+    Returns:
+        Normalized audio tensor
+    """
+    if not audio_chunks:
+        return torch.tensor([])
+
+    if len(audio_chunks) == 1:
+        return audio_chunks[0]
+
+    normalized_chunks = []
+
+    for i, chunk in enumerate(audio_chunks):
+        # Ensure chunk is 2D for consistency
+        if chunk.dim() == 1:
+            chunk = chunk.unsqueeze(0)
+
+        # Find trailing silence
+        if i < len(audio_chunks) - 1:  # Not the last chunk
+            # Calculate energy in the last part
+            tail_samples = min(chunk.shape[-1], min_silence_samples * 2)
+            tail_energy = torch.abs(chunk[..., -tail_samples:])
+
+            # Find actual end of speech
+            silence_mask = tail_energy < silence_threshold
+            trailing_silence = 0
+
+            for j in range(len(silence_mask) - 1, -1, -1):
+                if silence_mask[..., j]:
+                    trailing_silence += 1
+                else:
+                    break
+
+            # Normalize trailing silence
+            if trailing_silence > min_silence_samples:
+                # Remove excess silence
+                chunk = chunk[..., :-(trailing_silence - min_silence_samples)]
+            elif trailing_silence < min_silence_samples and trailing_silence > 0:
+                # Extend to minimum silence
+                additional_silence = min_silence_samples - trailing_silence
+                silence = torch.zeros(chunk.shape[0], additional_silence, device=chunk.device)
+                chunk = torch.cat([chunk, silence], dim=-1)
+            elif trailing_silence == 0:
+                # Add minimum silence if none found
+                silence = torch.zeros(chunk.shape[0], min_silence_samples, device=chunk.device)
+                chunk = torch.cat([chunk, silence], dim=-1)
+
+        normalized_chunks.append(chunk)
+
+    # Crossfade for smoother transitions
+    return crossfade_chunks(normalized_chunks)
+
 
 # Environment Configuration and Validation
 class Config:
@@ -540,16 +675,23 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
             speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
-        # Generate audio (chunk long prompts into multiple independent generations, then concatenate)
+        # Generate audio with improved chunking strategy
         # Default to chunking for long prompts; allow explicit 0 to disable.
         max_chars_per_chunk_raw = parameters.get("max_chars_per_chunk", 300)
+        enable_crossfade = parameters.get("enable_crossfade", True)
+        normalize_boundaries = parameters.get("normalize_boundaries", True)
+        target_duration = parameters.get("target_duration_seconds", 10.0)
+
         try:
             max_chars_per_chunk = int(max_chars_per_chunk_raw)
         except Exception:
             max_chars_per_chunk = 300
 
+        # Use improved chunking strategy
         if max_chars_per_chunk and max_chars_per_chunk > 0:
-            text_chunks = chunk_text(text, max_chars=max_chars_per_chunk)
+            # Use audio-aware chunking
+            text_chunks = chunk_text_for_audio(text, max_chars=max_chars_per_chunk,
+                                             target_duration_seconds=target_duration)
         else:
             text_chunks = [text]
 
@@ -558,6 +700,8 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
         audio_chunks: list[torch.Tensor] = []
         for idx, chunk in enumerate(text_chunks):
+            # Use deterministic seed progression for better continuity
+            chunk_seed = seed + (idx * 1000)  # Larger spacing for more variation
             audio_chunk, _ = sample_pipeline(
                 model=model,
                 fish_ae=fish_ae,
@@ -565,11 +709,17 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
                 sample_fn=sample_fn,
                 text_prompt=chunk,
                 speaker_audio=speaker_audio,
-                rng_seed=seed + idx,
+                rng_seed=chunk_seed,
             )
             audio_chunks.append(audio_chunk)
 
-        audio_out = torch.cat(audio_chunks, dim=-1)
+        # Apply audio processing for smoother concatenation
+        if normalize_boundaries and len(audio_chunks) > 1:
+            audio_out = normalize_chunk_boundaries(audio_chunks, sample_rate=44100)
+        elif enable_crossfade and len(audio_chunks) > 1:
+            audio_out = crossfade_chunks(audio_chunks)
+        else:
+            audio_out = torch.cat(audio_chunks, dim=-1)
 
         # Validate output
         if audio_out is None or len(audio_out) == 0:
