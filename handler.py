@@ -202,11 +202,12 @@ def normalize_chunk_boundaries(audio_chunks: list[torch.Tensor],
             tail_energy = torch.abs(chunk[..., -tail_samples:])
 
             # Find actual end of speech
-            silence_mask = tail_energy < silence_threshold
+            tail_energy_flat = tail_energy.flatten()
             trailing_silence = 0
 
-            for j in range(len(silence_mask) - 1, -1, -1):
-                if silence_mask[..., j]:
+            # Check from the end for silence
+            for j in range(len(tail_energy_flat) - 1, -1, -1):
+                if tail_energy_flat[j] < silence_threshold:
                     trailing_silence += 1
                 else:
                     break
