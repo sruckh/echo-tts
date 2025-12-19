@@ -132,19 +132,30 @@ def crossfade_chunks(audio_chunks: list[torch.Tensor], overlap_samples: int = 44
     Returns:
         Crossfaded audio tensor
     """
+    # DEBUG: Function entry
+    print(f"[DEBUG] crossfade_chunks called with {len(audio_chunks)} chunks, overlap={overlap_samples}")
+
     if len(audio_chunks) <= 1:
+        print(f"[DEBUG] Only {len(audio_chunks)} chunk(s), returning without crossfade")
         return torch.cat(audio_chunks, dim=-1) if audio_chunks else torch.tensor([])
 
+    print(f"[DEBUG] Starting crossfade of {len(audio_chunks)} chunks...")
     result = audio_chunks[0]
+    print(f"[DEBUG] Initial result shape: {result.shape}")
+
     for i in range(1, len(audio_chunks)):
+        print(f"[DEBUG] Crossfading chunk {i}/{len(audio_chunks)-1}")
         # Ensure minimum length for crossfade
         chunk_length = audio_chunks[i].shape[-1]
         prev_length = result.shape[-1]
+        print(f"[DEBUG]   Chunk {i} length: {chunk_length}, Result length: {prev_length}")
 
         # Adjust overlap if chunks are too short
         actual_overlap = min(overlap_samples, chunk_length // 4, prev_length // 4)
+        print(f"[DEBUG]   Actual overlap: {actual_overlap} samples")
 
         if actual_overlap > 0:
+            print(f"[DEBUG]   Applying crossfade with overlap={actual_overlap}")
             # Create fade windows
             fade_out = torch.linspace(1, 0, actual_overlap, device=audio_chunks[i].device)
             fade_in = torch.linspace(0, 1, actual_overlap, device=audio_chunks[i].device)
@@ -154,16 +165,21 @@ def crossfade_chunks(audio_chunks: list[torch.Tensor], overlap_samples: int = 44
             fade_in = fade_in.view(1, -1) if audio_chunks[i].dim() == 2 else fade_in
 
             # Apply crossfade
+            # Get overlap from result BEFORE trimming
+            prev_chunk_end = result[..., -actual_overlap:] * fade_out
             result = result[..., :-actual_overlap]
-            prev_chunk_end = audio_chunks[i-1][..., -actual_overlap:] * fade_out
             curr_chunk_start = audio_chunks[i][..., :actual_overlap] * fade_in
             crossfaded = prev_chunk_end + curr_chunk_start
 
             result = torch.cat([result, crossfaded, audio_chunks[i][..., actual_overlap:]], dim=-1)
+            print(f"[DEBUG]   Result shape after crossfade: {result.shape}")
         else:
             # No overlap, just concatenate
+            print(f"[DEBUG]   No overlap, concatenating directly")
             result = torch.cat([result, audio_chunks[i]], dim=-1)
+            print(f"[DEBUG]   Result shape after concat: {result.shape}")
 
+    print(f"[DEBUG] Crossfade complete, final shape: {result.shape}")
     return result
 
 
@@ -182,15 +198,22 @@ def normalize_chunk_boundaries(audio_chunks: list[torch.Tensor],
     Returns:
         Normalized audio tensor
     """
+    # DEBUG: Function entry
+    print(f"[DEBUG] normalize_chunk_boundaries called with {len(audio_chunks)} chunks")
+
     if not audio_chunks:
+        print("[DEBUG] No chunks, returning empty tensor")
         return torch.tensor([])
 
     if len(audio_chunks) == 1:
+        print("[DEBUG] Only 1 chunk, returning as-is")
         return audio_chunks[0]
 
+    print(f"[DEBUG] Normalizing {len(audio_chunks)} chunks...")
     normalized_chunks = []
 
     for i, chunk in enumerate(audio_chunks):
+        print(f"[DEBUG] Processing chunk {i+1}/{len(audio_chunks)}, shape: {chunk.shape}")
         # Ensure chunk is 2D for consistency
         if chunk.dim() == 1:
             chunk = chunk.unsqueeze(0)
@@ -229,7 +252,10 @@ def normalize_chunk_boundaries(audio_chunks: list[torch.Tensor],
         normalized_chunks.append(chunk)
 
     # Crossfade for smoother transitions
-    return crossfade_chunks(normalized_chunks)
+    print(f"[DEBUG] Calling crossfade_chunks from normalize_chunk_boundaries...")
+    result = crossfade_chunks(normalized_chunks)
+    print(f"[DEBUG] normalize_chunk_boundaries complete, final shape: {result.shape}")
+    return result
 
 
 # Environment Configuration and Validation
@@ -638,33 +664,48 @@ def health_check(request_id: Optional[str] = None) -> Dict:
 
 def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
     """Simplified synthesis function following Lotus pattern."""
+    # DEBUG: Function entry
+    print(f"[DEBUG] _synthesize called with job_id: {job_id}")
+    print(f"[DEBUG] Input text length: {len(job_input.get('text', ''))} chars")
+
     # Handle health check requests
     if job_input.get("action") == "health_check":
+        print("[DEBUG] Health check request")
         return health_check()
 
     # Validate text input
     text = job_input.get("text")
     if not text or not isinstance(text, str):
+        print("[DEBUG] Invalid text input")
         return {"error": "Missing or invalid 'text' field (expected string)"}
 
     if len(text.strip()) == 0:
+        print("[DEBUG] Empty text")
         return {"error": "Text cannot be empty"}
 
     if len(text) > 2000:  # Reasonable limit for TTS
+        print(f"[DEBUG] Text too long: {len(text)}")
         return {"error": f"Text too long: {len(text)} characters (max 2000)"}
 
     speaker_voice_name = job_input.get("speaker_voice")
     parameters = job_input.get("parameters", {})
     seed = parameters.get("seed", job_input.get("seed", 0))
+    # DEBUG: Parameters
+    print(f"[DEBUG] Speaker: {speaker_voice_name}, Seed: {seed}")
 
     try:
         # Load models
+        print("[DEBUG] Loading models...")
         model, fish_ae, pca_state = _load_models()
+        print("[DEBUG] Models loaded successfully")
+        print("[DEBUG] Building sample function...")
         sample_fn = _build_sample_fn(parameters)
+        print("[DEBUG] Sample function built")
 
         # Optional speaker conditioning
         speaker_audio = None
         if speaker_voice_name:
+            print(f"[DEBUG] Loading speaker audio: {speaker_voice_name}")
             candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
             if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
                 return {"error": "Invalid speaker_voice path"}
@@ -677,6 +718,7 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
         # Generate audio with improved chunking strategy
         # Default to chunking for long prompts; allow explicit 0 to disable.
+        print("[DEBUG] Preparing chunking parameters...")
         max_chars_per_chunk_raw = parameters.get("max_chars_per_chunk", 300)
         enable_crossfade = parameters.get("enable_crossfade", True)
         normalize_boundaries = parameters.get("normalize_boundaries", True)
@@ -687,21 +729,30 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
         except Exception:
             max_chars_per_chunk = 300
 
+        print(f"[DEBUG] Chunking config: max_chars={max_chars_per_chunk}, crossfade={enable_crossfade}, normalize={normalize_boundaries}")
+
         # Use improved chunking strategy
         if max_chars_per_chunk and max_chars_per_chunk > 0:
             # Use audio-aware chunking
+            print(f"[DEBUG] Chunking text with max_chars={max_chars_per_chunk}")
             text_chunks = chunk_text_for_audio(text, max_chars=max_chars_per_chunk,
                                              target_duration_seconds=target_duration)
+            print(f"[DEBUG] Text split into {len(text_chunks)} chunks")
         else:
+            print("[DEBUG] Using single chunk (no splitting)")
             text_chunks = [text]
 
         if not text_chunks:
+            print("[DEBUG] No text chunks after normalization")
             return {"error": "Text is empty after normalization"}
 
+        print(f"[DEBUG] Starting audio generation for {len(text_chunks)} chunks...")
         audio_chunks: list[torch.Tensor] = []
         for idx, chunk in enumerate(text_chunks):
+            print(f"[DEBUG] Generating chunk {idx+1}/{len(text_chunks)}: '{chunk[:50]}...' ({len(chunk)} chars)")
             # Use deterministic seed progression for better continuity
             chunk_seed = seed + (idx * 1000)  # Larger spacing for more variation
+            print(f"[DEBUG] Calling sample_pipeline with seed={chunk_seed}...")
             audio_chunk, _ = sample_pipeline(
                 model=model,
                 fish_ae=fish_ae,
@@ -711,25 +762,41 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
                 speaker_audio=speaker_audio,
                 rng_seed=chunk_seed,
             )
+            print(f"[DEBUG] Chunk {idx+1} generated: shape={audio_chunk.shape}, duration={audio_chunk.shape[-1]/44100:.2f}s")
             audio_chunks.append(audio_chunk)
+
+        print(f"[DEBUG] All {len(audio_chunks)} chunks generated successfully")
+        print("[DEBUG] Applying audio processing...")
 
         # Apply audio processing for smoother concatenation
         if normalize_boundaries and len(audio_chunks) > 1:
+            print(f"[DEBUG] Normalizing chunk boundaries for {len(audio_chunks)} chunks...")
             audio_out = normalize_chunk_boundaries(audio_chunks, sample_rate=44100)
+            print(f"[DEBUG] Normalization complete: shape={audio_out.shape}")
         elif enable_crossfade and len(audio_chunks) > 1:
+            print(f"[DEBUG] Crossfading {len(audio_chunks)} chunks...")
             audio_out = crossfade_chunks(audio_chunks)
+            print(f"[DEBUG] Crossfade complete: shape={audio_out.shape}")
         else:
+            print(f"[DEBUG] Simple concatenation of {len(audio_chunks)} chunks...")
             audio_out = torch.cat(audio_chunks, dim=-1)
+            print(f"[DEBUG] Concatenation complete: shape={audio_out.shape}")
 
         # Validate output
+        print(f"[DEBUG] Validating output: audio_out is None? {audio_out is None}, len={len(audio_out) if audio_out is not None else 'N/A'}")
         if audio_out is None or len(audio_out) == 0:
+            print("[DEBUG] No audio generated - returning error")
             return {"error": "No audio generated"}
 
         duration_seconds = len(audio_out[0]) / 44_100
+        print(f"[DEBUG] Audio duration: {duration_seconds:.2f}s")
         session_id = job_input.get("session_id") or str(uuid4())
+        print(f"[DEBUG] Session ID: {session_id}")
+        print("[DEBUG] Saving and uploading audio...")
         upload_meta = _save_and_upload_audio(audio_out[0].cpu(), 44_100, session_id)
+        print(f"[DEBUG] Upload complete: {upload_meta['filename']}")
 
-        return {
+        result = {
             "status": "completed",
             "filename": upload_meta["filename"],
             "url": upload_meta["url"],
@@ -741,9 +808,15 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
                 "device": config.device,
             },
         }
+        print(f"[DEBUG] Returning successful result: {result['status']}")
+        return result
 
     except Exception as e:
         error_trace = traceback.format_exc()
+        # DEBUG: Exception details
+        print(f"[DEBUG] EXCEPTION in _synthesize: {type(e).__name__}")
+        print(f"[DEBUG] Exception message: {str(e)}")
+        print(f"[DEBUG] Full traceback:\n{error_trace}")
         return {
             "error": str(e),
             "error_type": type(e).__name__,
@@ -753,11 +826,22 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
 
 def handler(job: Dict) -> Dict:
     """RunPod serverless handler simplified like Lotus."""
+    # DEBUG: Handler entry point
+    print(f"[DEBUG] Handler called with job ID: {job.get('id')}")
+    print(f"[DEBUG] Job input keys: {list(job.get('input', {}).keys())}")
     log.debug(f"Handler received job: {job.get('id')}")
     try:
-        return _synthesize(job.get("input", {}), job.get("id"))
+        # DEBUG: About to call _synthesize
+        print("[DEBUG] Calling _synthesize...")
+        result = _synthesize(job.get("input", {}), job.get("id"))
+        # DEBUG: _synthesize returned
+        print(f"[DEBUG] _synthesize returned with status: {result.get('status', result.get('error', 'unknown'))}")
+        return result
     except Exception as e:
         error_trace = traceback.format_exc()
+        # DEBUG: Exception caught
+        print(f"[DEBUG] Exception in handler: {type(e).__name__}: {str(e)}")
+        print(f"[DEBUG] Traceback:\n{error_trace}")
         log.error(f"Handler failed: {str(e)}")
         log.error(f"Traceback: {error_trace}")
         return {"error": str(e), "error_type": type(e).__name__}
