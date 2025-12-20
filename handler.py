@@ -694,8 +694,8 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
     if len(text.strip()) == 0:
         return {"error": "Text cannot be empty"}
 
-    if len(text) > 2000:  # Reasonable limit for TTS
-        return {"error": f"Text too long: {len(text)} characters (max 2000)"}
+    if len(text) > 4000:  # Reasonable limit for TTS
+        return {"error": f"Text too long: {len(text)} characters (max 4000)"}
 
     speaker_voice_name = job_input.get("speaker_voice")
     parameters = job_input.get("parameters", {})
