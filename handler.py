@@ -741,21 +741,34 @@ def encode_to_linacodec(audio: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
 
     lina = load_linacodec()
 
-    # Ensure audio is numpy array on CPU
-    if isinstance(audio, torch.Tensor):
-        audio_np = audio.cpu().numpy()
-    else:
-        audio_np = audio
+    # Create temporary file
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+        tmp_wav_path = tmp_wav.name
 
-    # Flatten if 2D
-    if len(audio_np.shape) > 1:
-        audio_np = audio_np.flatten()
+    try:
+        # Prepare audio tensor
+        if isinstance(audio, np.ndarray):
+            audio = torch.from_numpy(audio)
+        
+        audio = audio.detach().cpu()
+        
+        # Ensure 2D (channels, time) for torchaudio
+        if audio.dim() == 1:
+            audio = audio.unsqueeze(0)
+            
+        # Echo-TTS output is 44.1kHz
+        torchaudio.save(tmp_wav_path, audio, 44100)
+        
+        # Encode from file path
+        # LinaCodec handles loading and resampling
+        tokens, embedding = lina.encode(tmp_wav_path)
+        
+        return tokens, embedding
 
-    # Encode to LinaCodec tokens
-    # Returns: (tokens, global_embedding)
-    tokens, embedding = lina.encode(audio_np)
-
-    return tokens, embedding
+    finally:
+        # Clean up
+        if os.path.exists(tmp_wav_path):
+            os.unlink(tmp_wav_path)
 
 
 # =============================================================================
