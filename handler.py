@@ -1098,11 +1098,13 @@ def handler(job: Dict) -> Any:
 
     # Handle health check
     if input_data.get("action") == "health_check":
-        return health_check(request_id=job_id)
+        yield health_check(request_id=job_id)
+        return
 
     # Validate input
     if not text:
-        return {'error': 'No text provided', 'status': 'error'}
+        yield {'error': 'No text provided', 'status': 'error'}
+        return
 
     try:
         # Load models
@@ -1121,33 +1123,35 @@ def handler(job: Dict) -> Any:
             if speaker_voice_name:
                 candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
                 if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
-                    return {"error": "Invalid speaker_voice path"}
+                    yield {"error": "Invalid speaker_voice path"}
+                    return
                 if not candidate_path.exists():
-                    return {"error": f"speaker_voice '{speaker_voice_name}' not found"}
+                    yield {"error": f"speaker_voice '{speaker_voice_name}' not found"}
+                    return
                 speaker_audio = load_audio(str(candidate_path)).to(model.device)
 
             if output_format == 'pcm_16':
                 # Stream decoded audio chunks (for Cloudflare Workers)
                 log.info(f"[Tier 3][{job_id}] Starting decoded audio stream (pcm_16)")
-                return generate_audio_stream_decoded(
+                yield from generate_audio_stream_decoded(
                     text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
                 )
             else:
                 # Stream LinaCodec tokens (for local middleware)
                 log.info(f"[Tier 3][{job_id}] Starting LinaCodec token stream")
-                return generate_linacodec_token_stream(
+                yield from generate_linacodec_token_stream(
                     text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
                 )
         else:
             # Batch mode
             log.info(f"[Tier 3][{job_id}] Batch mode synthesis")
-            return _synthesize(input_data, job_id)
+            yield _synthesize(input_data, job_id)
 
     except Exception as e:
         error_trace = traceback.format_exc()
         log.error(f"Handler failed: {str(e)}")
         log.error(f"Traceback: {error_trace}")
-        return {"error": str(e), "error_type": type(e).__name__, "traceback": error_trace}
+        yield {"error": str(e), "error_type": type(e).__name__, "traceback": error_trace}
 
 
 def main() -> None:
