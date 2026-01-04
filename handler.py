@@ -30,6 +30,8 @@ import runpod
 import torch
 import torchaudio
 import boto3
+import numpy as np
+from typing import Generator, Dict, Any, Tuple, List
 
 from inference import (
     load_model_from_hf,
@@ -44,6 +46,15 @@ from inference import (
 log = runpod.RunPodLogger()
 
 _WHITESPACE_RE = re.compile(r"\s+")
+
+# LinaCodec Availability
+try:
+    from linacodec.codec import LinaCodec
+    LINACODEC_AVAILABLE = True
+    log.info("LinaCodec is available for streaming")
+except ImportError:
+    LINACODEC_AVAILABLE = False
+    log.warning("LinaCodec not available. Streaming in linacodec_tokens format will fail.")
 
 
 def chunk_text(text: str, max_chars: int = 300) -> list[str]:
@@ -320,6 +331,34 @@ config = Config()
 _MODELS: Dict[str, object] = {}
 
 
+def load_linacodec():
+    """
+    Load LinaCodec encoder/decoder (cached globally)
+
+    Model is auto-downloaded from HuggingFace on first use
+    and cached to network volume.
+    """
+    if _MODELS.get("linacodec"):
+        log.info("[Tier 3] Using cached LinaCodec model")
+        return _MODELS["linacodec"]
+
+    if not LINACODEC_AVAILABLE:
+        raise RuntimeError("LinaCodec is not installed")
+
+    log.info("[Tier 3] Loading LinaCodec model from network volume...")
+
+    # Ensure cache is on network volume
+    os.environ['HF_HOME'] = '/runpod-volume/huggingface-cache'
+    os.environ['TRANSFORMERS_CACHE'] = '/runpod-volume/huggingface-cache'
+
+    # LinaCodec auto-downloads from HuggingFace to cache
+    linacodec = LinaCodec()
+    _MODELS["linacodec"] = linacodec
+
+    log.info("[Tier 3] LinaCodec loaded and cached to network volume!")
+    return linacodec
+
+
 def _load_models(device: str = None, request_id: Optional[str] = None) -> Tuple[object, object, object]:
     """Lazy-load and cache model, autoencoder, and PCA state."""
     # Use config device if not specified
@@ -328,8 +367,8 @@ def _load_models(device: str = None, request_id: Optional[str] = None) -> Tuple[
 
     log.debug(f"_load_models called. Current cache: {list(_MODELS.keys())}", request_id=request_id)
 
-    if _MODELS:
-        log.info("Models already cached, reusing", request_id=request_id)
+    if "model" in _MODELS and "fish_ae" in _MODELS and "pca_state" in _MODELS:
+        log.info("Core models already cached, reusing", request_id=request_id)
         return _MODELS["model"], _MODELS["fish_ae"], _MODELS["pca_state"]
 
     # Validate HF token before attempting to load models
@@ -679,6 +718,244 @@ def health_check(request_id: Optional[str] = None) -> Dict:
     return health_status
 
 
+import base64
+
+# =============================================================================
+# LINACODEC ENCODING (Phase 2B)
+# =============================================================================
+
+def encode_to_linacodec(audio: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Encode audio to LinaCodec tokens.
+
+    Args:
+        audio: Audio tensor (float32, any sample rate)
+
+    Returns:
+        Tuple of (tokens, global_embedding)
+
+    Note: LinaCodec automatically upsamples to 48kHz during encoding.
+    """
+    if not LINACODEC_AVAILABLE:
+        raise RuntimeError("LinaCodec is not available")
+
+    lina = load_linacodec()
+
+    # Ensure audio is numpy array on CPU
+    if isinstance(audio, torch.Tensor):
+        audio_np = audio.cpu().numpy()
+    else:
+        audio_np = audio
+
+    # Flatten if 2D
+    if len(audio_np.shape) > 1:
+        audio_np = audio_np.flatten()
+
+    # Encode to LinaCodec tokens
+    # Returns: (tokens, global_embedding)
+    tokens, embedding = lina.encode(audio_np)
+
+    return tokens, embedding
+
+
+# =============================================================================
+# STREAMING GENERATORS
+# =============================================================================
+
+def generate_audio_stream(
+    text: str,
+    model,
+    fish_ae,
+    pca_state,
+    sample_fn,
+    speaker_audio,
+    seed: int,
+    max_chars_per_chunk: int = 300,
+    target_duration: float = 10.0
+) -> Generator[torch.Tensor, None, None]:
+    """
+    Generate audio in chunks using the TTS model.
+
+    Yields audio chunks as they're generated.
+    """
+    # Use improved chunking strategy
+    if max_chars_per_chunk and max_chars_per_chunk > 0:
+        text_chunks = chunk_text_for_audio(text, max_chars=max_chars_per_chunk,
+                                         target_duration_seconds=target_duration)
+    else:
+        text_chunks = [text]
+
+    log.info(f"[Tier 3] Split text into {len(text_chunks)} chunks for streaming")
+
+    for idx, chunk in enumerate(text_chunks):
+        log.debug(f"[Tier 3] Generating chunk {idx+1}/{len(text_chunks)}")
+        
+        # Use deterministic seed progression for better continuity
+        chunk_seed = seed + (idx * 1000)
+        
+        audio_chunk, _ = sample_pipeline(
+            model=model,
+            fish_ae=fish_ae,
+            pca_state=pca_state,
+            sample_fn=sample_fn,
+            text_prompt=chunk,
+            speaker_audio=speaker_audio,
+            rng_seed=chunk_seed,
+        )
+        
+        yield audio_chunk
+
+
+def generate_linacodec_token_stream(
+    text: str,
+    model,
+    fish_ae,
+    pca_state,
+    sample_fn,
+    speaker_audio,
+    seed: int,
+    max_chars_per_chunk: int = 300
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Phase 2B: Generate streaming LinaCodec tokens.
+    """
+    if not LINACODEC_AVAILABLE:
+        raise RuntimeError("LinaCodec streaming requires LinaCodec to be installed")
+
+    chunk_num = 0
+    total_tokens = 0
+    start_time = time.time()
+
+    for audio_chunk in generate_audio_stream(
+        text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
+    ):
+        chunk_num += 1
+        chunk_start = time.time()
+
+        # Encode to LinaCodec tokens
+        tokens, embedding = encode_to_linacodec(audio_chunk)
+
+        encode_time = time.time() - chunk_start
+
+        # Convert to list for JSON serialization
+        tokens_list = tokens.tolist() if hasattr(tokens, 'tolist') else list(tokens)
+        embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
+
+        total_tokens += len(tokens_list)
+
+        log.debug(f"[Tier 3] Chunk {chunk_num}: {len(tokens_list)} tokens (encode: {encode_time:.3f}s)")
+
+        # Yield token chunk
+        yield {
+            'status': 'streaming',
+            'chunk': chunk_num,
+            'format': 'linacodec_tokens',
+            'tokens': tokens_list,
+            'embedding': embedding_list,
+            'sample_rate': 48000,
+            'original_sample_rate': 44100,
+            'num_tokens': len(tokens_list),
+            'encode_time_ms': encode_time * 1000
+        }
+
+    elapsed = time.time() - start_time
+    log.info(f"[Tier 3] Stream complete: {chunk_num} chunks, {total_tokens} total tokens, {elapsed:.2f}s")
+
+    # Final completion signal
+    yield {
+        'status': 'complete',
+        'format': 'linacodec_tokens',
+        'message': 'All chunks streamed',
+        'total_chunks': chunk_num,
+        'total_tokens': total_tokens,
+        'elapsed_time_seconds': elapsed
+    }
+
+
+def generate_audio_stream_decoded(
+    text: str,
+    model,
+    fish_ae,
+    pca_state,
+    sample_fn,
+    speaker_audio,
+    seed: int,
+    max_chars_per_chunk: int = 300
+) -> Generator[Dict[str, Any], None, None]:
+    """
+    Phase 2A: Generate streaming audio with LinaCodec compression then decode.
+    """
+    if not LINACODEC_AVAILABLE:
+        # Fallback: stream raw audio without LinaCodec
+        log.warning("[Tier 3] LinaCodec not available, streaming raw audio")
+
+        for idx, audio_chunk in enumerate(generate_audio_stream(
+            text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
+        )):
+            audio_b64 = base64.b64encode(audio_chunk.cpu().numpy().tobytes()).decode('utf-8')
+            yield {
+                'status': 'streaming',
+                'chunk': idx + 1,
+                'format': 'pcm_44',
+                'audio_chunk': audio_b64,
+                'sample_rate': 44100
+            }
+
+        yield {
+            'status': 'complete',
+            'format': 'pcm_44',
+            'message': 'All chunks streamed (no LinaCodec)'
+        }
+        return
+
+    lina = load_linacodec()
+    chunk_num = 0
+    start_time = time.time()
+
+    for audio_chunk in generate_audio_stream(
+        text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
+    ):
+        chunk_num += 1
+        chunk_start = time.time()
+
+        # Encode to LinaCodec tokens
+        tokens, embedding = encode_to_linacodec(audio_chunk)
+
+        # Decode back to audio (now at 48kHz!)
+        decoded_audio = lina.decode(tokens, embedding)
+
+        process_time = time.time() - chunk_start
+
+        # Convert to base64 for transmission
+        audio_array = decoded_audio.cpu().numpy() if hasattr(decoded_audio, 'cpu') else decoded_audio
+        
+        # Convert float32 to int16 PCM
+        audio_int16 = (audio_array * 32767).astype(np.int16)
+        audio_b64 = base64.b64encode(audio_int16.tobytes()).decode('utf-8')
+
+        log.debug(f"[Tier 3] Chunk {chunk_num}: {len(audio_array)} samples (process: {process_time:.3f}s)")
+
+        yield {
+            'status': 'streaming',
+            'chunk': chunk_num,
+            'format': 'pcm_16',  # 16-bit PCM at 48kHz
+            'audio_chunk': audio_b64,
+            'sample_rate': 48000,
+            'process_time_ms': process_time * 1000
+        }
+
+    elapsed = time.time() - start_time
+    log.info(f"[Tier 3] Stream complete: {chunk_num} chunks, {elapsed:.2f}s")
+
+    yield {
+        'status': 'complete',
+        'format': 'pcm_16',
+        'message': 'All chunks streamed',
+        'total_chunks': chunk_num,
+        'elapsed_time_seconds': elapsed
+    }
+
+
 def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
     """Simplified synthesis function following Lotus pattern."""
 
@@ -803,17 +1080,74 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
         }
 
 
-def handler(job: Dict) -> Dict:
-    """RunPod serverless handler simplified like Lotus."""
-    log.debug(f"Handler received job: {job.get('id')}")
+def handler(job: Dict) -> Any:
+    """
+    Main handler for RunPod Serverless.
+
+    Supports both streaming and batch modes.
+    """
+    job_id = job.get('id')
+    input_data = job.get('input', {})
+
+    # Extract parameters
+    text = input_data.get('text', '')
+    stream = input_data.get('stream', False)
+    output_format = input_data.get('output_format', 'linacodec_tokens')
+
+    log.debug(f"[Tier 3][{job_id}] Handler called: stream={stream}, format={output_format}")
+
+    # Handle health check
+    if input_data.get("action") == "health_check":
+        return health_check(request_id=job_id)
+
+    # Validate input
+    if not text:
+        return {'error': 'No text provided', 'status': 'error'}
+
     try:
-        result = _synthesize(job.get("input", {}), job.get("id"))
-        return result
+        # Load models
+        model, fish_ae, pca_state = _load_models(request_id=job_id)
+        
+        # Routing based on mode
+        if stream:
+            parameters = input_data.get("parameters", {})
+            seed = parameters.get("seed", input_data.get("seed", 0))
+            max_chars_per_chunk = int(parameters.get("max_chars_per_chunk", 300))
+            sample_fn = _build_sample_fn(parameters, request_id=job_id)
+            
+            # Optional speaker conditioning
+            speaker_audio = None
+            speaker_voice_name = input_data.get("speaker_voice")
+            if speaker_voice_name:
+                candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
+                if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
+                    return {"error": "Invalid speaker_voice path"}
+                if not candidate_path.exists():
+                    return {"error": f"speaker_voice '{speaker_voice_name}' not found"}
+                speaker_audio = load_audio(str(candidate_path)).to(model.device)
+
+            if output_format == 'pcm_16':
+                # Stream decoded audio chunks (for Cloudflare Workers)
+                log.info(f"[Tier 3][{job_id}] Starting decoded audio stream (pcm_16)")
+                return runpod.stream(generate_audio_stream_decoded(
+                    text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
+                ))
+            else:
+                # Stream LinaCodec tokens (for local middleware)
+                log.info(f"[Tier 3][{job_id}] Starting LinaCodec token stream")
+                return runpod.stream(generate_linacodec_token_stream(
+                    text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
+                ))
+        else:
+            # Batch mode
+            log.info(f"[Tier 3][{job_id}] Batch mode synthesis")
+            return _synthesize(input_data, job_id)
+
     except Exception as e:
         error_trace = traceback.format_exc()
         log.error(f"Handler failed: {str(e)}")
         log.error(f"Traceback: {error_trace}")
-        return {"error": str(e), "error_type": type(e).__name__}
+        return {"error": str(e), "error_type": type(e).__name__, "traceback": error_trace}
 
 
 def main() -> None:

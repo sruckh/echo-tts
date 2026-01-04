@@ -6,3 +6,6 @@ numpy
 safetensors
 einops
 gradio==5.49.1
+runpod>=1.6.1
+boto3
+git+https://github.com/ysharma3501/LinaCodec.git

@@ -25,7 +25,8 @@ RUN git clone "$ECHO_TTS_UPSTREAM_REPO" /opt/echo-tts-remote \
     && git checkout "$ECHO_TTS_UPSTREAM_REF" \
     && sed -i '/gradio/d' requirements.txt \
     && pip install -r requirements.txt \
-    && pip install runpod==1.6.1 uvicorn[standard] pydantic python-multipart tqdm boto3
+    && pip install runpod==1.6.1 uvicorn[standard] pydantic python-multipart tqdm boto3 \
+    && pip install git+https://github.com/ysharma3501/LinaCodec.git
 
 # Copy serverless handler + bootstrap into image
 COPY handler.py /opt/echo-tts-remote/handler.py
