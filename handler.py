@@ -750,11 +750,20 @@ def encode_to_linacodec(audio: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
         if isinstance(audio, np.ndarray):
             audio = torch.from_numpy(audio)
         
-        audio = audio.detach().cpu()
+        # Squeeze all singleton dimensions (e.g. (1, 1, samples) -> (samples,))
+        audio = audio.detach().cpu().squeeze()
         
         # Ensure 2D (channels, time) for torchaudio
         if audio.dim() == 1:
             audio = audio.unsqueeze(0)
+        elif audio.dim() == 0:
+            audio = audio.unsqueeze(0).unsqueeze(0)
+        elif audio.dim() > 2:
+            # If still > 2D, take the first slice of extra dimensions
+            while audio.dim() > 2:
+                audio = audio[0]
+            if audio.dim() == 1:
+                audio = audio.unsqueeze(0)
             
         # Echo-TTS output is 44.1kHz
         torchaudio.save(tmp_wav_path, audio, 44100)
