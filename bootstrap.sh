@@ -36,6 +36,15 @@ mkdir -p "$AUDIO_VOICES_DIR" "$OUTPUT_AUDIO_DIR"
 # Make sure the shipped source is importable
 export PYTHONPATH="$SRC_DIR:$PYTHONPATH"
 
+# Ensure LinaCodec is installed (one-time exception check)
+# This handles cases where the environment/volume assumes software is already installed
+if ! python3 -c "import linacodec" &> /dev/null; then
+    log "LinaCodec not found (runtime check). Performing one-time installation..."
+    pip install --no-cache-dir git+https://github.com/ysharma3501/LinaCodec.git
+else
+    log "LinaCodec is available."
+fi
+
 # Start handler (runpod serverless mode)
 log "Starting RunPod handler..."
 log "Container ready for requests"

@@ -1129,15 +1129,15 @@ def handler(job: Dict) -> Any:
             if output_format == 'pcm_16':
                 # Stream decoded audio chunks (for Cloudflare Workers)
                 log.info(f"[Tier 3][{job_id}] Starting decoded audio stream (pcm_16)")
-                return runpod.stream(generate_audio_stream_decoded(
+                return generate_audio_stream_decoded(
                     text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-                ))
+                )
             else:
                 # Stream LinaCodec tokens (for local middleware)
                 log.info(f"[Tier 3][{job_id}] Starting LinaCodec token stream")
-                return runpod.stream(generate_linacodec_token_stream(
+                return generate_linacodec_token_stream(
                     text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-                ))
+                )
         else:
             # Batch mode
             log.info(f"[Tier 3][{job_id}] Batch mode synthesis")
