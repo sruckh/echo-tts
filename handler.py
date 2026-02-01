@@ -53,7 +53,8 @@ import torch
 import torchaudio
 import boto3
 
-import config
+import config as config_module
+from config import config  # Config instance for validation and runtime settings
 from serverless_engine import get_inference_engine, LINACODEC_AVAILABLE
 
 # Initialize RunPod structured logger
@@ -351,7 +352,7 @@ def handler_batch(job_input: Dict) -> Dict:
         Result dictionary with S3 URL and metadata
     """
     # Clean up old output files
-    cleanup_old_files(str(config.OUTPUT_AUDIO_DIR), days=config.CLEANUP_DAYS)
+    cleanup_old_files(str(config.OUTPUT_AUDIO_DIR), days=config_module.CLEANUP_DAYS)
 
     # Extract and validate parameters
     params, error = extract_and_validate_params(job_input)
