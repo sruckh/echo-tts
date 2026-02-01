@@ -312,13 +312,35 @@ def extract_and_validate_params(job_input: Dict) -> tuple:
 
     # Validate speaker_voice if provided
     if speaker_voice:
+        # Check if speaker_voice already has an extension
         candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice).resolve()
+
+        # Security check - ensure path is within AUDIO_VOICES_DIR
         if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
             return None, {"error": "Invalid speaker_voice path"}
-        if not candidate_path.exists():
-            return None, {"error": f"speaker_voice '{speaker_voice}' not found"}
-        if candidate_path.suffix.lower() not in config.AUDIO_EXTS:
-            return None, {"error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
+
+        # If file exists with given name, use it
+        if candidate_path.exists():
+            if candidate_path.suffix.lower() not in config.AUDIO_EXTS:
+                return None, {"error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
+        else:
+            # Auto-detect extension - search for matching file
+            found_path = None
+            for ext in config.AUDIO_EXTS:
+                test_path = config.AUDIO_VOICES_DIR / f"{speaker_voice}{ext}"
+                if test_path.exists():
+                    found_path = test_path
+                    break
+
+            if found_path is None:
+                # List available voices for helpful error message
+                available = [f.stem for f in config.AUDIO_VOICES_DIR.glob("*")
+                            if f.suffix.lower() in config.AUDIO_EXTS]
+                return None, {"error": f"speaker_voice '{speaker_voice}' not found. Available: {available}"}
+
+            # Update speaker_voice to include the found extension
+            speaker_voice = found_path.name
+            log.debug(f"Auto-detected voice file: {speaker_voice}")
 
     # Validate output_format
     valid_formats = ["pcm_16", "linacodec_tokens"]
