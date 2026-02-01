@@ -1,6 +1,7 @@
 # coding=utf-8
 # Echo-TTS RunPod Serverless Handler
 # SPDX-License-Identifier: MIT
+# Build trigger: 2026-02-01-v2
 
 """
 RunPod Serverless Handler for Echo-TTS
