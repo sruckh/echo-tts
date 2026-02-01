@@ -287,9 +287,12 @@ def extract_and_validate_params(job_input: Dict) -> tuple:
     Returns:
         tuple: (params_dict, error_dict) - error_dict is None if validation passes
     """
+    log.debug(f"Validating job input: {list(job_input.keys())}")
+
     # Extract required parameters
     text = job_input.get("text")
     if not text:
+        log.error("Validation failed: Missing 'text' parameter")
         return None, {"error": "Missing 'text' parameter"}
 
     if not isinstance(text, str):
@@ -357,6 +360,7 @@ def handler_batch(job_input: Dict) -> Dict:
     # Extract and validate parameters
     params, error = extract_and_validate_params(job_input)
     if error:
+        log.error(f"Parameter validation failed: {error}")
         return error
 
     text = params["text"]
@@ -499,8 +503,9 @@ def handler(job: Dict):
         return
 
     # For batch mode, yield result (handler must be generator for RunPod compatibility)
-    log.info(f"[{job_id}] Batch mode")
+    log.info(f"[{job_id}] Batch mode - input keys: {list(input_data.keys())}")
     result = handler_batch(input_data)
+    log.info(f"[{job_id}] Batch mode result status: {result.get('status', result.get('error', 'unknown'))}")
     yield result
 
 
