@@ -8,3 +8,4 @@ venv/
 .vscode/
 .serena/
 RP_SERVERLESS.md
+tmp/

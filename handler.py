@@ -1,503 +1,110 @@
+# coding=utf-8
+# Echo-TTS RunPod Serverless Handler
+# SPDX-License-Identifier: MIT
+
 """
-RunPod serverless handler for Echo-TTS.
+RunPod Serverless Handler for Echo-TTS
+
+Following Fish Audio pattern for consistency across TTS services.
 
 Accepts:
-- text (str): text to synthesize. WhisperD-style tokens like [S1] are optional; normalization is handled upstream.
-- speaker_voice (str | None): filename inside AUDIO_VOICES_DIR to use as reference audio. Supported suffixes:
-  .wav, .mp3, .m4a, .ogg, .flac, .webm, .aac, .opus
-- parameters (dict, optional): sampler options (num_steps, cfg_scale_text, cfg_scale_speaker,
-  cfg_min_t, cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale,
-  speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed).
-- session_id (str, optional): used to name the output file (otherwise a UUID is generated).
+- text (str): text to synthesize
+- speaker_voice (str, optional): filename in AUDIO_VOICES_DIR for speaker reference
+- stream (bool, optional): enable streaming mode (default: false)
+- output_format (str, optional): "pcm_16" for decoded audio, "linacodec_tokens" for tokens
+- parameters (dict, optional): generation options (num_steps, cfg_scale_text, etc.)
 
-Output: uploads compressed audio (OGG) to S3-compatible storage and returns filename, presigned URL, and metadata.
+Batch mode returns:
+{
+    "status": "completed",
+    "url": str,  # S3 presigned URL
+    "filename": str,
+    "s3_key": str,
+    "metadata": {...}
+}
+
+Streaming mode yields:
+{
+    "status": "streaming",
+    "chunk": int,
+    "format": str,
+    "audio_chunk" or "tokens": str/list,
+    ...
+}
+{
+    "status": "complete",
+    ...
+}
 """
 
-import argparse
 import os
-import re
-import subprocess
 import sys
+import argparse
+import base64
+import subprocess
+import tempfile
 import time
 import traceback
-from functools import partial
-from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Any, Optional, Generator
 from uuid import uuid4
-import tempfile
 
 import runpod
 import torch
 import torchaudio
 import boto3
-import numpy as np
-from typing import Generator, Dict, Any, Tuple, List
 
-from inference import (
-    load_model_from_hf,
-    load_fish_ae_from_hf,
-    load_pca_state_from_hf,
-    load_audio,
-    sample_pipeline,
-    sample_euler_cfg_independent_guidances,
-)
+import config
+from serverless_engine import get_inference_engine, LINACODEC_AVAILABLE
 
 # Initialize RunPod structured logger
 log = runpod.RunPodLogger()
 
-_WHITESPACE_RE = re.compile(r"\s+")
 
-# LinaCodec Availability
-try:
-    from linacodec.codec import LinaCodec
-    LINACODEC_AVAILABLE = True
-    log.info("LinaCodec is available for streaming")
-except ImportError:
-    LINACODEC_AVAILABLE = False
-    log.warning("LinaCodec not available. Streaming in linacodec_tokens format will fail.")
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
 
-
-def chunk_text(text: str, max_chars: int = 300) -> list[str]:
-    """
-    Split input text into <= max_chars character chunks, preferring sentence/clause/word boundaries.
-    """
-    if max_chars <= 0:
-        raise ValueError("max_chars must be > 0")
-
-    normalized = _WHITESPACE_RE.sub(" ", (text or "")).strip()
-    if not normalized:
-        return []
-
-    if len(normalized) <= max_chars:
-        return [normalized]
-
-    sentence_enders = {".", "!", "?"}
-    clause_enders = {",", ";", ":"}
-    closers = {'"', "'", ")", "]", "}", "”", "’"}
-
-    chunks: list[str] = []
-    remaining = normalized
-    while remaining:
-        if len(remaining) <= max_chars:
-            chunks.append(remaining)
-            break
-
-        window = remaining[: max_chars + 1]
-        candidate_sentence: int | None = None
-        candidate_clause: int | None = None
-        candidate_space: int | None = None
-
-        for i in range(1, len(window)):
-            if not window[i].isspace():
-                continue
-
-            candidate_space = i
-            prev = window[i - 1]
-            prev2 = window[i - 2] if i >= 2 else ""
-
-            if prev in sentence_enders or (prev in closers and prev2 in sentence_enders):
-                candidate_sentence = i
-            elif prev in clause_enders or (prev in closers and prev2 in clause_enders):
-                candidate_clause = i
-
-        split_at = candidate_sentence or candidate_clause or candidate_space or max_chars
-        chunk = remaining[:split_at].strip()
-        if chunk:
-            chunks.append(chunk)
-
-        remaining = remaining[split_at:].strip()
-
-    return chunks
-
-
-def chunk_text_for_audio(text: str, max_chars: int = 300, target_duration_seconds: float = 10.0) -> list[str]:
-    """Chunk text considering both character limits and estimated audio duration.
-
-    Args:
-        text: Input text to chunk
-        max_chars: Maximum characters per chunk
-        target_duration_seconds: Target duration per chunk in seconds
-
-    Returns:
-        List of text chunks optimized for audio generation
-    """
-    # Rough estimate: ~12 characters per second of speech
-    target_chars = min(max_chars, int(target_duration_seconds * 12))
-
-    chunks = chunk_text(text, max_chars=target_chars)
-
-    # Ensure last chunk isn't too short (minimum 2 seconds)
-    if len(chunks) > 1 and len(chunks[-1]) < 24:
-        chunks[-2] += " " + chunks[-1]
-        chunks.pop()
-
-    return chunks
-
-
-def crossfade_chunks(audio_chunks: list[torch.Tensor], overlap_samples: int = 4410) -> torch.Tensor:
-    """Apply cross-fading between audio chunks for smoother transitions.
-
-    Args:
-        audio_chunks: List of audio tensors to concatenate
-        overlap_samples: Number of samples to overlap (default: 100ms at 44.1kHz)
-
-    Returns:
-        Crossfaded audio tensor
-    """
-
-    if len(audio_chunks) <= 1:
-        return torch.cat(audio_chunks, dim=-1) if audio_chunks else torch.tensor([])
-
-    result = audio_chunks[0]
-
-    for i in range(1, len(audio_chunks)):
-        # Ensure minimum length for crossfade
-        chunk_length = audio_chunks[i].shape[-1]
-        prev_length = result.shape[-1]
-
-        # Adjust overlap if chunks are too short
-        actual_overlap = min(overlap_samples, chunk_length // 4, prev_length // 4)
-
-        if actual_overlap > 0:
-            # Create fade windows
-            fade_out = torch.linspace(1, 0, actual_overlap, device=audio_chunks[i].device)
-            fade_in = torch.linspace(0, 1, actual_overlap, device=audio_chunks[i].device)
-
-            # Match dimensions
-            fade_out = fade_out.view(1, -1) if audio_chunks[i].dim() == 2 else fade_out
-            fade_in = fade_in.view(1, -1) if audio_chunks[i].dim() == 2 else fade_in
-
-            # Apply crossfade
-            # Get overlap from result BEFORE trimming
-            prev_chunk_end = result[..., -actual_overlap:] * fade_out
-            result = result[..., :-actual_overlap]
-            curr_chunk_start = audio_chunks[i][..., :actual_overlap] * fade_in
-            crossfaded = prev_chunk_end + curr_chunk_start
-
-            result = torch.cat([result, crossfaded, audio_chunks[i][..., actual_overlap:]], dim=-1)
-        else:
-            # No overlap, just concatenate
-            result = torch.cat([result, audio_chunks[i]], dim=-1)
-
-    return result
-
-
-def normalize_chunk_boundaries(audio_chunks: list[torch.Tensor],
-                             sample_rate: int = 44100,
-                             silence_threshold: float = 0.01,
-                             min_silence_samples: int = 22050) -> torch.Tensor:
-    """Normalize silences at chunk boundaries to reduce artifacts.
-
-    Args:
-        audio_chunks: List of audio tensors
-        sample_rate: Audio sample rate
-        silence_threshold: Energy threshold for silence detection
-        min_silence_samples: Minimum silence between chunks (0.5 seconds)
-
-    Returns:
-        Normalized audio tensor
-    """
-
-    if not audio_chunks:
-        return torch.tensor([])
-
-    if len(audio_chunks) == 1:
-        return audio_chunks[0]
-
-    normalized_chunks = []
-
-    for i, chunk in enumerate(audio_chunks):
-        # Ensure chunk is 2D for consistency
-        if chunk.dim() == 1:
-            chunk = chunk.unsqueeze(0)
-
-        # Find trailing silence
-        if i < len(audio_chunks) - 1:  # Not the last chunk
-            # Calculate energy in the last part
-            tail_samples = min(chunk.shape[-1], min_silence_samples * 2)
-            tail_energy = torch.abs(chunk[..., -tail_samples:])
-
-            # Find actual end of speech
-            tail_energy_flat = tail_energy.flatten()
-            trailing_silence = 0
-
-            # Check from the end for silence
-            for j in range(len(tail_energy_flat) - 1, -1, -1):
-                if tail_energy_flat[j] < silence_threshold:
-                    trailing_silence += 1
-                else:
-                    break
-
-            # Normalize trailing silence
-            if trailing_silence > min_silence_samples:
-                # Remove excess silence
-                chunk = chunk[..., :-(trailing_silence - min_silence_samples)]
-            elif trailing_silence < min_silence_samples and trailing_silence > 0:
-                # Extend to minimum silence
-                additional_silence = min_silence_samples - trailing_silence
-                # Create silence with same dimensionality as chunk
-                silence = torch.zeros(*chunk.shape[:-1], additional_silence, device=chunk.device)
-                chunk = torch.cat([chunk, silence], dim=-1)
-            elif trailing_silence == 0:
-                # Add minimum silence if none found
-                # Create silence with same dimensionality as chunk
-                silence = torch.zeros(*chunk.shape[:-1], min_silence_samples, device=chunk.device)
-                chunk = torch.cat([chunk, silence], dim=-1)
-
-        normalized_chunks.append(chunk)
-
-    # Crossfade for smoother transitions
-    result = crossfade_chunks(normalized_chunks)
-    return result
-
-
-# Environment Configuration and Validation
-class Config:
-    """Configuration validation and storage"""
-    def __init__(self):
-        self.validation_errors = []
-
-        # Basic hardware detection
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        if torch.cuda.is_available():
-            self.gpu_name = torch.cuda.get_device_name(0)
-            self.gpu_memory = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
-            log.info(f"GPU detected: {self.gpu_name} with {self.gpu_memory:.1f}GB memory")
-
-        # Required environment variables
-        self.HF_TOKEN = os.environ.get("HF_TOKEN")
-        if not self.HF_TOKEN:
-            self.validation_errors.append("HF_TOKEN is required but not set")
-
-        # S3 Configuration (required for production)
-        self.S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL")
-        self.S3_ACCESS_KEY_ID = os.environ.get("S3_ACCESS_KEY_ID")
-        self.S3_SECRET_ACCESS_KEY = os.environ.get("S3_SECRET_ACCESS_KEY")
-        self.S3_BUCKET_NAME = os.environ.get("S3_BUCKET_NAME")
-        self.S3_REGION = os.environ.get("S3_REGION", "us-east-1")
-
-        # Check if S3 is properly configured
-        s3_missing = [var for var in ["S3_ENDPOINT_URL", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_BUCKET_NAME"]
-                      if not getattr(self, var)]
-        if s3_missing:
-            self.validation_errors.append(f"S3 configuration missing: {', '.join(s3_missing)}")
-
-        # Directory configuration
-        self.AUDIO_VOICES_DIR = Path(os.environ.get("AUDIO_VOICES_DIR", "/runpod-volume/echo-tts/audio_voices"))
-        self.OUTPUT_AUDIO_DIR = Path(os.environ.get("OUTPUT_AUDIO_DIR", "/runpod-volume/echo-tts/output_audio"))
-
-        # Ensure directories exist
-        try:
-            self.AUDIO_VOICES_DIR.mkdir(parents=True, exist_ok=True)
-            self.OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-            log.info(f"Audio directories: {self.AUDIO_VOICES_DIR}, {self.OUTPUT_AUDIO_DIR}")
-        except Exception as e:
-            self.validation_errors.append(f"Failed to create directories: {e}")
-
-        # Additional configuration
-        self.AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac", ".opus"}
-
-        # Log all environment variables (without sensitive data)
-        log.info(f"Device: {self.device}")
-        log.debug(f"AUDIO_VOICES_DIR: {self.AUDIO_VOICES_DIR}")
-        log.debug(f"OUTPUT_AUDIO_DIR: {'SET' if self.OUTPUT_AUDIO_DIR else 'NOT SET'}")
-        log.debug(f"S3_ENDPOINT_URL: {'SET' if self.S3_ENDPOINT_URL else 'NOT SET'}")
-        log.info(f"S3_BUCKET_NAME: {'SET' if self.S3_BUCKET_NAME else 'NOT SET'}")
-        log.info(f"HF_TOKEN: {'SET' if self.HF_TOKEN else 'NOT SET'}")
-
-        # Check audio files in voices directory
-        try:
-            audio_files = list(self.AUDIO_VOICES_DIR.glob("*"))
-            audio_files = [f for f in audio_files if f.suffix.lower() in self.AUDIO_EXTS]
-            log.debug(f"Found {len(audio_files)} audio files")
-            for f in audio_files[:5]:  # Log first 5
-                log.debug(f"  - {f.name}")
-            if len(audio_files) > 5:
-                log.debug(f"  ... and {len(audio_files) - 5} more")
-        except Exception as e:
-            log.warning(f"Could not scan audio directory: {e}")
-
-    def validate(self) -> bool:
-        """Return True if configuration is valid"""
-        if self.validation_errors:
-            log.error("Configuration validation failed:")
-            for error in self.validation_errors:
-                log.error(f"  - {error}")
-            return False
-        return True
-
-# Global configuration instance
-config = Config()
-_MODELS: Dict[str, object] = {}
-
-
-def load_linacodec():
-    """
-    Load LinaCodec encoder/decoder (cached globally)
-
-    Model is auto-downloaded from HuggingFace on first use
-    and cached to network volume.
-    """
-    if _MODELS.get("linacodec"):
-        log.info("[Tier 3] Using cached LinaCodec model")
-        return _MODELS["linacodec"]
-
-    if not LINACODEC_AVAILABLE:
-        raise RuntimeError("LinaCodec is not installed")
-
-    log.info("[Tier 3] Loading LinaCodec model from network volume...")
-
-    # Ensure cache is on network volume
-    os.environ['HF_HOME'] = '/runpod-volume/huggingface-cache'
-    os.environ['TRANSFORMERS_CACHE'] = '/runpod-volume/huggingface-cache'
-
-    # LinaCodec auto-downloads from HuggingFace to cache
-    linacodec = LinaCodec()
-    _MODELS["linacodec"] = linacodec
-
-    log.info("[Tier 3] LinaCodec loaded and cached to network volume!")
-    return linacodec
-
-
-def _load_models(device: str = None, request_id: Optional[str] = None) -> Tuple[object, object, object]:
-    """Lazy-load and cache model, autoencoder, and PCA state."""
-    # Use config device if not specified
-    if device is None:
-        device = config.device
-
-    log.debug(f"_load_models called. Current cache: {list(_MODELS.keys())}", request_id=request_id)
-
-    if "model" in _MODELS and "fish_ae" in _MODELS and "pca_state" in _MODELS:
-        log.info("Core models already cached, reusing", request_id=request_id)
-        return _MODELS["model"], _MODELS["fish_ae"], _MODELS["pca_state"]
-
-    # Validate HF token before attempting to load models
-    if not config.HF_TOKEN:
-        error_msg = "HF_TOKEN is required to load models from HuggingFace"
-        log.error(error_msg, request_id=request_id)
-        raise RuntimeError(error_msg)
-
-    log.info(f"Starting model loading on device: {device}", request_id=request_id)
-    start_time = time.time()
-
+def cleanup_old_files(directory: str, days: int = 2) -> None:
+    """Delete files older than specified days from directory."""
     try:
-        torch_dtype = torch.bfloat16 if device.startswith("cuda") else None
-        log.debug(f"Using dtype: {torch_dtype}", request_id=request_id)
+        from pathlib import Path
 
-        # Check available memory
-        if device.startswith("cuda"):
-            allocated = torch.cuda.memory_allocated(0) / (1024**3)  # GB
-            cached = torch.cuda.memory_reserved(0) / (1024**3)  # GB
-            total = torch.cuda.get_device_properties(0).total_memory / (1024**3)  # GB
-            log.debug(f"GPU memory: {allocated:.1f}GB allocated, {cached:.1f}GB cached, {total:.1f}GB total", request_id=request_id)
+        output_dir = Path(directory)
+        if not output_dir.exists():
+            return
 
-        # Load main model
-        log.info("Loading EchoDiT model from HuggingFace...", request_id=request_id)
-        model_start = time.time()
+        current_time = time.time()
+        cutoff_time = current_time - (days * 24 * 60 * 60)
 
-        try:
-            model = load_model_from_hf(
-                device=device,
-                dtype=torch_dtype,
-                compile=False,
-                delete_blockwise_modules=False,
-                token=config.HF_TOKEN
-            )
-            model_time = time.time() - model_start
-            log.info(f"EchoDiT model loaded in {model_time:.2f}s", request_id=request_id)
-        except Exception as model_error:
-            error_msg = f"Failed to load EchoDiT model: {str(model_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
+        deleted_count = 0
+        for file_path in output_dir.glob('*'):
+            if file_path.is_file():
+                file_age = file_path.stat().st_mtime
+                if file_age < cutoff_time:
+                    file_path.unlink()
+                    deleted_count += 1
 
-        # Load autoencoder
-        log.info("Loading Fish Speech S1-DAC autoencoder from HuggingFace...", request_id=request_id)
-        ae_start = time.time()
-
-        try:
-            fish_ae = load_fish_ae_from_hf(
-                device=device,
-                dtype=torch_dtype,
-                compile=False,
-                token=config.HF_TOKEN
-            )
-            ae_time = time.time() - ae_start
-            log.info(f"Autoencoder loaded in {ae_time:.2f}s", request_id=request_id)
-        except Exception as ae_error:
-            error_msg = f"Failed to load autoencoder: {str(ae_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
-
-        # Load PCA state
-        log.info("Loading PCA state from HuggingFace...", request_id=request_id)
-        pca_start = time.time()
-
-        try:
-            pca_state = load_pca_state_from_hf(device=device, token=config.HF_TOKEN)
-            pca_time = time.time() - pca_start
-            log.info(f"PCA state loaded in {pca_time:.2f}s", request_id=request_id)
-        except Exception as pca_error:
-            error_msg = f"Failed to load PCA state: {str(pca_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
-
-        # Cache models
-        _MODELS.update({"model": model, "fish_ae": fish_ae, "pca_state": pca_state})
-
-        total_time = time.time() - start_time
-        log.info(f"All models loaded successfully in {total_time:.2f}s", request_id=request_id)
-
-        # Log memory usage after loading
-        if device.startswith("cuda"):
-            allocated = torch.cuda.memory_allocated(0) / (1024**3)  # GB
-            cached = torch.cuda.memory_reserved(0) / (1024**3)  # GB
-            log.debug(f"GPU memory after loading: {allocated:.1f}GB allocated, {cached:.1f}GB cached", request_id=request_id)
-
-        return model, fish_ae, pca_state
-
+        if deleted_count > 0:
+            log.info(f"Cleaned up {deleted_count} files older than {days} days from {directory}")
     except Exception as e:
-        error_trace = traceback.format_exc()
-        log.error(f"Model loading failed: {str(e)}", request_id=request_id)
-        log.error(f"Traceback:\n{error_trace}", request_id=request_id)
-        raise
+        log.error(f"Cleanup failed: {e}")
 
 
-def _build_sample_fn(params: Dict, request_id: Optional[str] = None) -> callable:
-    """Create sampler partial with defaults and overrides."""
-    log.debug(f"Building sampler with params: {params}", request_id=request_id)
-    return partial(
-        sample_euler_cfg_independent_guidances,
-        num_steps=params.get("num_steps", 40),
-        cfg_scale_text=params.get("cfg_scale_text", 3.0),
-        cfg_scale_speaker=params.get("cfg_scale_speaker", 8.0),
-        cfg_min_t=params.get("cfg_min_t", 0.5),
-        cfg_max_t=params.get("cfg_max_t", 1.0),
-        truncation_factor=params.get("truncation_factor"),
-        rescale_k=params.get("rescale_k"),
-        rescale_sigma=params.get("rescale_sigma"),
-        speaker_kv_scale=params.get("speaker_kv_scale"),
-        speaker_kv_max_layers=params.get("speaker_kv_max_layers"),
-        speaker_kv_min_t=params.get("speaker_kv_min_t"),
-        sequence_length=params.get("sequence_length", 640),
-    )
-
-
-def _get_s3_client():
-    """Create and return S3 client with enhanced error handling"""
+def get_s3_client():
+    """Create and return S3 client with enhanced error handling."""
     log.debug("Creating S3 client...")
 
-    # Check S3 configuration
-    if not all([config.S3_ENDPOINT_URL, config.S3_ACCESS_KEY_ID, config.S3_SECRET_ACCESS_KEY, config.S3_BUCKET_NAME]):
-        missing = []
-        if not config.S3_ENDPOINT_URL:
-            missing.append("S3_ENDPOINT_URL")
-        if not config.S3_ACCESS_KEY_ID:
-            missing.append("S3_ACCESS_KEY_ID")
-        if not config.S3_SECRET_ACCESS_KEY:
-            missing.append("S3_SECRET_ACCESS_KEY")
-        if not config.S3_BUCKET_NAME:
-            missing.append("S3_BUCKET_NAME")
+    missing = []
+    if not config.S3_ENDPOINT_URL:
+        missing.append("S3_ENDPOINT_URL")
+    if not config.S3_ACCESS_KEY_ID:
+        missing.append("S3_ACCESS_KEY_ID")
+    if not config.S3_SECRET_ACCESS_KEY:
+        missing.append("S3_SECRET_ACCESS_KEY")
+    if not config.S3_BUCKET_NAME:
+        missing.append("S3_BUCKET_NAME")
 
+    if missing:
         error_msg = f"Missing S3 configuration: {', '.join(missing)}"
         log.error(error_msg)
         raise RuntimeError(error_msg)
@@ -518,121 +125,58 @@ def _get_s3_client():
         raise RuntimeError(error_msg)
 
 
-def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session_id: str, request_id: Optional[str] = None) -> Dict[str, str]:
-    """Save audio to OGG (Opus) at 24kHz and upload to S3-compatible storage."""
-    log.info(f"Saving and uploading audio for session: {session_id}", request_id=request_id)
+def encode_to_opus(audio_tensor: torch.Tensor, sample_rate: int) -> bytes:
+    """
+    Encode audio tensor to Opus format in OGG container.
 
-    # Ensure output directory exists
-    config.OUTPUT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
-    filename = f"{session_id}.ogg"
-    key = f"{filename}"
+    Args:
+        audio_tensor: Audio tensor (float32)
+        sample_rate: Sample rate of audio
 
-    # Create temporary files for WAV (intermediate) and OGG (final)
+    Returns:
+        Opus-encoded audio bytes
+    """
     with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
         tmp_wav_path = tmp_wav.name
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp_ogg:
         tmp_ogg_path = tmp_ogg.name
 
     try:
-        log.debug(f"Saving audio to temporary WAV file: {tmp_wav_path}", request_id=request_id)
-
         # Validate audio tensor
         if audio_tensor is None:
             raise RuntimeError("Audio tensor is None")
         if len(audio_tensor.shape) < 2:
             raise RuntimeError(f"Invalid audio tensor shape: {audio_tensor.shape}")
 
-        log.debug(f"Audio tensor shape: {audio_tensor.shape}, sample_rate: {sample_rate}", request_id=request_id)
+        # Save as WAV first
+        torchaudio.save(tmp_wav_path, audio_tensor, sample_rate)
 
-        # Save as WAV first (lossless intermediate format)
-        try:
-            torchaudio.save(tmp_wav_path, audio_tensor, sample_rate)
-            log.debug(f"Audio saved successfully to WAV: {tmp_wav_path}", request_id=request_id)
-        except Exception as save_error:
-            error_msg = f"Failed to save audio file: {str(save_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
-
-        # Convert to OGG Opus at 24kHz with 128k bitrate using ffmpeg
-        try:
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-i", tmp_wav_path,
-                "-ar", "24000",           # Resample to 24kHz
-                "-c:a", "libopus",        # Opus codec
-                "-b:a", "128k",           # 128k bitrate
-                "-vbr", "on",             # Variable bitrate
-                "-compression_level", "10", # Maximum compression efficiency
-                "-y",                     # Overwrite output file
-                tmp_ogg_path
-            ]
-            result = subprocess.run(
-                ffmpeg_cmd,
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            log.debug(f"Audio converted to Opus successfully: {tmp_ogg_path}", request_id=request_id)
-        except subprocess.CalledProcessError as ffmpeg_error:
-            error_msg = f"FFmpeg conversion failed: {ffmpeg_error.stderr}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
-        except Exception as convert_error:
-            error_msg = f"Failed to convert audio: {str(convert_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
+        # Convert to OGG Opus at 24kHz with 128k bitrate
+        ffmpeg_cmd = [
+            "ffmpeg", "-y",
+            "-i", tmp_wav_path,
+            "-ar", "24000",
+            "-c:a", "libopus",
+            "-b:a", "128k",
+            "-vbr", "on",
+            "-compression_level", "10",
+            tmp_ogg_path
+        ]
+        result = subprocess.run(
+            ffmpeg_cmd,
+            capture_output=True,
+            text=True,
+            check=True
+        )
 
         # Read the converted Opus file
-        try:
-            with open(tmp_ogg_path, "rb") as f:
-                data = f.read()
-        except Exception as read_error:
-            error_msg = f"Failed to read converted audio file: {str(read_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
+        with open(tmp_ogg_path, "rb") as f:
+            data = f.read()
 
         file_size_mb = len(data) / (1024 * 1024)
-        log.info(f"Audio file size (Opus 24kHz 128k): {file_size_mb:.2f}MB", request_id=request_id)
+        log.info(f"Audio encoded to Opus: {file_size_mb:.2f}MB")
 
-        if file_size_mb > 50:  # Warn if file is very large
-            log.warning(f"Large audio file: {file_size_mb:.2f}MB", request_id=request_id)
-
-        # Upload to S3
-        log.debug("Uploading to S3...", request_id=request_id)
-        try:
-            s3 = _get_s3_client()
-            s3.put_object(
-                Bucket=config.S3_BUCKET_NAME,
-                Key=key,
-                Body=data,
-                ContentType="audio/ogg; codecs=opus",
-            )
-            log.debug(f"Successfully uploaded to S3: {key}", request_id=request_id)
-        except Exception as upload_error:
-            error_msg = f"Failed to upload to S3: {str(upload_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
-
-        # Generate presigned URL
-        try:
-            presigned_url = s3.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": config.S3_BUCKET_NAME, "Key": key},
-                ExpiresIn=3600,
-            )
-            log.debug("Presigned URL generated successfully", request_id=request_id)
-        except Exception as url_error:
-            error_msg = f"Failed to generate presigned URL: {str(url_error)}"
-            log.error(error_msg, request_id=request_id)
-            raise RuntimeError(error_msg)
-
-        log.info(f"Audio uploaded successfully: {key}", request_id=request_id)
-        return {"filename": filename, "url": presigned_url, "key": key}
-
-    except Exception as e:
-        error_msg = f"Failed to save/upload audio: {str(e)}"
-        log.error(error_msg, request_id=request_id)
-        raise
+        return data
 
     finally:
         # Clean up temporary files
@@ -640,14 +184,50 @@ def _save_and_upload_audio(audio_tensor: torch.Tensor, sample_rate: int, session
             try:
                 if os.path.exists(tmp_file):
                     os.unlink(tmp_file)
-                    log.debug(f"Cleaned up temporary file: {tmp_file}", request_id=request_id)
-            except OSError as cleanup_error:
-                log.warning(f"Failed to clean up temporary file {tmp_file}: {cleanup_error}", request_id=request_id)
+            except OSError:
+                pass
 
 
-def health_check(request_id: Optional[str] = None) -> Dict:
-    """Comprehensive health check for the TTS service"""
-    log.info("Performing health check...", request_id=request_id)
+def upload_to_s3(audio_bytes: bytes, filename: str) -> str:
+    """
+    Upload audio to S3 and return presigned URL.
+
+    Args:
+        audio_bytes: Audio data to upload
+        filename: Filename to use in S3
+
+    Returns:
+        Presigned URL for the uploaded file
+    """
+    s3 = get_s3_client()
+    key = filename
+
+    try:
+        s3.put_object(
+            Bucket=config.S3_BUCKET_NAME,
+            Key=key,
+            Body=audio_bytes,
+            ContentType="audio/ogg; codecs=opus",
+        )
+        log.info(f"Successfully uploaded to S3: {key}")
+
+        # Generate presigned URL
+        presigned_url = s3.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": config.S3_BUCKET_NAME, "Key": key},
+            ExpiresIn=3600,
+        )
+        return presigned_url
+
+    except Exception as e:
+        error_msg = f"Failed to upload to S3: {str(e)}"
+        log.error(error_msg)
+        raise RuntimeError(error_msg)
+
+
+def health_check() -> Dict:
+    """Comprehensive health check for the TTS service."""
+    log.info("Performing health check...")
 
     health_status = {
         "status": "healthy",
@@ -660,13 +240,6 @@ def health_check(request_id: Optional[str] = None) -> Dict:
     health_status["checks"]["configuration"] = {
         "status": "pass" if config_valid else "fail",
         "details": f"Validation errors: {len(config.validation_errors)}" if not config_valid else "All good"
-    }
-
-    # Check models
-    models_loaded = bool(_MODELS)
-    health_status["checks"]["models"] = {
-        "status": "pass" if models_loaded else "fail",
-        "details": f"Loaded models: {list(_MODELS.keys())}"
     }
 
     # Check GPU/CUDA
@@ -688,413 +261,150 @@ def health_check(request_id: Optional[str] = None) -> Dict:
         "details": f"S3 configured: {s3_configured}"
     }
 
-    # Check directories
-    audio_dir_exists = config.AUDIO_VOICES_DIR.exists()
-    output_dir_exists = config.OUTPUT_AUDIO_DIR.exists()
-    health_status["checks"]["directories"] = {
-        "status": "pass" if (audio_dir_exists and output_dir_exists) else "fail",
-        "details": f"Audio dir: {audio_dir_exists}, Output dir: {output_dir_exists}"
+    # Check LinaCodec
+    health_status["checks"]["linacodec"] = {
+        "status": "pass" if LINACODEC_AVAILABLE else "warn",
+        "details": f"LinaCodec available: {LINACODEC_AVAILABLE}"
     }
-
-    # Check audio files
-    try:
-        audio_files = list(config.AUDIO_VOICES_DIR.glob("*"))
-        audio_files = [f for f in audio_files if f.suffix.lower() in config.AUDIO_EXTS]
-        health_status["checks"]["audio_files"] = {
-            "status": "pass" if audio_files else "warn",
-            "details": f"Found {len(audio_files)} audio files"
-        }
-    except Exception as e:
-        health_status["checks"]["audio_files"] = {
-            "status": "fail",
-            "details": f"Error checking audio files: {e}"
-        }
 
     # Overall status
     all_pass = all(check["status"] == "pass" for check in health_status["checks"].values())
     health_status["status"] = "healthy" if all_pass else "unhealthy"
 
-    log.info(f"Health check completed: {health_status['status']}", request_id=request_id)
+    log.info(f"Health check completed: {health_status['status']}")
     return health_status
 
 
-import base64
-
 # =============================================================================
-# LINACODEC ENCODING (Phase 2B)
+# PARAMETER VALIDATION
 # =============================================================================
 
-def encode_to_linacodec(audio: torch.Tensor) -> Tuple[np.ndarray, np.ndarray]:
+def extract_and_validate_params(job_input: Dict) -> tuple:
     """
-    Encode audio to LinaCodec tokens.
-
-    Args:
-        audio: Audio tensor (float32, any sample rate)
+    Extract and validate parameters from job input.
 
     Returns:
-        Tuple of (tokens, global_embedding)
-
-    Note: LinaCodec automatically upsamples to 48kHz during encoding.
+        tuple: (params_dict, error_dict) - error_dict is None if validation passes
     """
-    if not LINACODEC_AVAILABLE:
-        raise RuntimeError("LinaCodec is not available")
-
-    lina = load_linacodec()
-
-    # Create temporary file
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
-        tmp_wav_path = tmp_wav.name
-
-    try:
-        # Prepare audio tensor
-        if isinstance(audio, np.ndarray):
-            audio = torch.from_numpy(audio)
-        
-        # Squeeze all singleton dimensions (e.g. (1, 1, samples) -> (samples,))
-        audio = audio.detach().cpu().squeeze()
-        
-        # Ensure 2D (channels, time) for torchaudio
-        if audio.dim() == 1:
-            audio = audio.unsqueeze(0)
-        elif audio.dim() == 0:
-            audio = audio.unsqueeze(0).unsqueeze(0)
-        elif audio.dim() > 2:
-            # If still > 2D, take the first slice of extra dimensions
-            while audio.dim() > 2:
-                audio = audio[0]
-            if audio.dim() == 1:
-                audio = audio.unsqueeze(0)
-            
-        # Echo-TTS output is 44.1kHz
-        torchaudio.save(tmp_wav_path, audio, 44100)
-        
-        # Encode from file path
-        # LinaCodec handles loading and resampling
-        tokens, embedding = lina.encode(tmp_wav_path)
-        
-        return tokens, embedding
-
-    finally:
-        # Clean up
-        if os.path.exists(tmp_wav_path):
-            os.unlink(tmp_wav_path)
-
-
-# =============================================================================
-# STREAMING GENERATORS
-# =============================================================================
-
-def generate_audio_stream(
-    text: str,
-    model,
-    fish_ae,
-    pca_state,
-    sample_fn,
-    speaker_audio,
-    seed: int,
-    max_chars_per_chunk: int = 300,
-    target_duration: float = 10.0
-) -> Generator[torch.Tensor, None, None]:
-    """
-    Generate audio in chunks using the TTS model.
-
-    Yields audio chunks as they're generated.
-    """
-    # Use improved chunking strategy
-    if max_chars_per_chunk and max_chars_per_chunk > 0:
-        text_chunks = chunk_text_for_audio(text, max_chars=max_chars_per_chunk,
-                                         target_duration_seconds=target_duration)
-    else:
-        text_chunks = [text]
-
-    log.info(f"[Tier 3] Split text into {len(text_chunks)} chunks for streaming")
-
-    for idx, chunk in enumerate(text_chunks):
-        log.debug(f"[Tier 3] Generating chunk {idx+1}/{len(text_chunks)}")
-        
-        # Use deterministic seed progression for better continuity
-        chunk_seed = seed + (idx * 1000)
-        
-        audio_chunk, _ = sample_pipeline(
-            model=model,
-            fish_ae=fish_ae,
-            pca_state=pca_state,
-            sample_fn=sample_fn,
-            text_prompt=chunk,
-            speaker_audio=speaker_audio,
-            rng_seed=chunk_seed,
-        )
-        
-        yield audio_chunk
-
-
-def generate_linacodec_token_stream(
-    text: str,
-    model,
-    fish_ae,
-    pca_state,
-    sample_fn,
-    speaker_audio,
-    seed: int,
-    max_chars_per_chunk: int = 300
-) -> Generator[Dict[str, Any], None, None]:
-    """
-    Phase 2B: Generate streaming LinaCodec tokens.
-    """
-    if not LINACODEC_AVAILABLE:
-        raise RuntimeError("LinaCodec streaming requires LinaCodec to be installed")
-
-    chunk_num = 0
-    total_tokens = 0
-    start_time = time.time()
-
-    for audio_chunk in generate_audio_stream(
-        text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-    ):
-        chunk_num += 1
-        chunk_start = time.time()
-
-        # Encode to LinaCodec tokens
-        tokens, embedding = encode_to_linacodec(audio_chunk)
-
-        encode_time = time.time() - chunk_start
-
-        # Convert to list for JSON serialization
-        tokens_list = tokens.tolist() if hasattr(tokens, 'tolist') else list(tokens)
-        embedding_list = embedding.tolist() if hasattr(embedding, 'tolist') else list(embedding)
-
-        total_tokens += len(tokens_list)
-
-        log.debug(f"[Tier 3] Chunk {chunk_num}: {len(tokens_list)} tokens (encode: {encode_time:.3f}s)")
-
-        # Yield token chunk
-        yield {
-            'status': 'streaming',
-            'chunk': chunk_num,
-            'format': 'linacodec_tokens',
-            'tokens': tokens_list,
-            'embedding': embedding_list,
-            'sample_rate': 48000,
-            'original_sample_rate': 44100,
-            'num_tokens': len(tokens_list),
-            'encode_time_ms': encode_time * 1000
-        }
-
-    elapsed = time.time() - start_time
-    log.info(f"[Tier 3] Stream complete: {chunk_num} chunks, {total_tokens} total tokens, {elapsed:.2f}s")
-
-    # Final completion signal
-    yield {
-        'status': 'complete',
-        'format': 'linacodec_tokens',
-        'message': 'All chunks streamed',
-        'total_chunks': chunk_num,
-        'total_tokens': total_tokens,
-        'elapsed_time_seconds': elapsed
-    }
-
-
-def generate_audio_stream_decoded(
-    text: str,
-    model,
-    fish_ae,
-    pca_state,
-    sample_fn,
-    speaker_audio,
-    seed: int,
-    max_chars_per_chunk: int = 300
-) -> Generator[Dict[str, Any], None, None]:
-    """
-    Phase 2A: Generate streaming audio with LinaCodec compression then decode.
-    """
-    if not LINACODEC_AVAILABLE:
-        # Fallback: stream raw audio without LinaCodec
-        log.warning("[Tier 3] LinaCodec not available, streaming raw audio")
-
-        for idx, audio_chunk in enumerate(generate_audio_stream(
-            text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-        )):
-            audio_b64 = base64.b64encode(audio_chunk.cpu().numpy().tobytes()).decode('utf-8')
-            yield {
-                'status': 'streaming',
-                'chunk': idx + 1,
-                'format': 'pcm_44',
-                'audio_chunk': audio_b64,
-                'sample_rate': 44100
-            }
-
-        yield {
-            'status': 'complete',
-            'format': 'pcm_44',
-            'message': 'All chunks streamed (no LinaCodec)'
-        }
-        return
-
-    lina = load_linacodec()
-    chunk_num = 0
-    start_time = time.time()
-
-    for audio_chunk in generate_audio_stream(
-        text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-    ):
-        chunk_num += 1
-        chunk_start = time.time()
-
-        # Encode to LinaCodec tokens
-        tokens, embedding = encode_to_linacodec(audio_chunk)
-
-        # Decode back to audio (now at 48kHz!)
-        decoded_audio = lina.decode(tokens, embedding)
-
-        process_time = time.time() - chunk_start
-
-        # Convert to base64 for transmission
-        audio_array = decoded_audio.cpu().numpy() if hasattr(decoded_audio, 'cpu') else decoded_audio
-        
-        # Convert float32 to int16 PCM
-        audio_int16 = (audio_array * 32767).astype(np.int16)
-        audio_b64 = base64.b64encode(audio_int16.tobytes()).decode('utf-8')
-
-        log.debug(f"[Tier 3] Chunk {chunk_num}: {len(audio_array)} samples (process: {process_time:.3f}s)")
-
-        yield {
-            'status': 'streaming',
-            'chunk': chunk_num,
-            'format': 'pcm_16',  # 16-bit PCM at 48kHz
-            'audio_chunk': audio_b64,
-            'sample_rate': 48000,
-            'process_time_ms': process_time * 1000
-        }
-
-    elapsed = time.time() - start_time
-    log.info(f"[Tier 3] Stream complete: {chunk_num} chunks, {elapsed:.2f}s")
-
-    yield {
-        'status': 'complete',
-        'format': 'pcm_16',
-        'message': 'All chunks streamed',
-        'total_chunks': chunk_num,
-        'elapsed_time_seconds': elapsed
-    }
-
-
-def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
-    """Simplified synthesis function following Lotus pattern."""
-
-    # Handle health check requests
-    if job_input.get("action") == "health_check":
-        return health_check()
-
-    # Validate text input
+    # Extract required parameters
     text = job_input.get("text")
-    if not text or not isinstance(text, str):
-        return {"error": "Missing or invalid 'text' field (expected string)"}
+    if not text:
+        return None, {"error": "Missing 'text' parameter"}
+
+    if not isinstance(text, str):
+        return None, {"error": "Invalid 'text' parameter (expected string)"}
 
     if len(text.strip()) == 0:
-        return {"error": "Text cannot be empty"}
+        return None, {"error": "Text cannot be empty"}
 
-    if len(text) > 4000:  # Reasonable limit for TTS
-        return {"error": f"Text too long: {len(text)} characters (max 4000)"}
+    if len(text) > 4000:
+        return None, {"error": f"Text too long: {len(text)} characters (max 4000)"}
 
-    speaker_voice_name = job_input.get("speaker_voice")
+    # Optional parameters
+    speaker_voice = job_input.get("speaker_voice")
+    stream = job_input.get("stream", False)
+    output_format = job_input.get("output_format", "linacodec_tokens")
     parameters = job_input.get("parameters", {})
-    seed = parameters.get("seed", job_input.get("seed", 0))
+
+    # Validate speaker_voice if provided
+    if speaker_voice:
+        candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice).resolve()
+        if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
+            return None, {"error": "Invalid speaker_voice path"}
+        if not candidate_path.exists():
+            return None, {"error": f"speaker_voice '{speaker_voice}' not found"}
+        if candidate_path.suffix.lower() not in config.AUDIO_EXTS:
+            return None, {"error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
+
+    # Validate output_format
+    valid_formats = ["pcm_16", "linacodec_tokens"]
+    if output_format not in valid_formats:
+        return None, {"error": f"Invalid output_format: {output_format}. Must be one of {valid_formats}"}
+
+    # Validate streaming with LinaCodec
+    if stream and output_format == "linacodec_tokens" and not LINACODEC_AVAILABLE:
+        return None, {"error": "LinaCodec streaming requires LinaCodec to be installed"}
+
+    params = {
+        "text": text,
+        "speaker_voice": speaker_voice,
+        "stream": stream,
+        "output_format": output_format,
+        "parameters": parameters,
+    }
+
+    return params, None
+
+
+# =============================================================================
+# HANDLER FUNCTIONS
+# =============================================================================
+
+def handler_batch(job_input: Dict) -> Dict:
+    """
+    Batch mode handler - generates complete audio and uploads to S3.
+
+    Args:
+        job_input: Job input dictionary
+
+    Returns:
+        Result dictionary with S3 URL and metadata
+    """
+    # Clean up old output files
+    cleanup_old_files(str(config.OUTPUT_AUDIO_DIR), days=config.CLEANUP_DAYS)
+
+    # Extract and validate parameters
+    params, error = extract_and_validate_params(job_input)
+    if error:
+        return error
+
+    text = params["text"]
+    speaker_voice = params["speaker_voice"]
+    parameters = params["parameters"]
 
     try:
-        # Load models
-        model, fish_ae, pca_state = _load_models()
-        sample_fn = _build_sample_fn(parameters)
+        # Get inference engine
+        inference_engine = get_inference_engine()
 
-        # Optional speaker conditioning
-        speaker_audio = None
-        if speaker_voice_name:
-            candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
-            if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
-                return {"error": "Invalid speaker_voice path"}
-            if not candidate_path.exists():
-                return {"error": f"speaker_voice '{speaker_voice_name}' not found"}
-            if candidate_path.suffix.lower() not in config.AUDIO_EXTS:
-                return {"error": f"Unsupported speaker_voice extension: {candidate_path.suffix}"}
+        # Generate speech
+        log.info(f"Generating speech for {len(text)} characters")
+        audio_out, sample_rate = inference_engine.generate_speech(
+            text=text,
+            speaker_voice=speaker_voice,
+            parameters=parameters,
+        )
 
-            speaker_audio = load_audio(str(candidate_path)).to(model.device)
-
-        # Generate audio with improved chunking strategy
-        # Default to chunking for long prompts; allow explicit 0 to disable.
-        max_chars_per_chunk_raw = parameters.get("max_chars_per_chunk", 300)
-        enable_crossfade = parameters.get("enable_crossfade", True)
-        normalize_boundaries = parameters.get("normalize_boundaries", True)
-        target_duration = parameters.get("target_duration_seconds", 10.0)
-
-        try:
-            max_chars_per_chunk = int(max_chars_per_chunk_raw)
-        except Exception:
-            max_chars_per_chunk = 300
-
-
-        # Use improved chunking strategy
-        if max_chars_per_chunk and max_chars_per_chunk > 0:
-            # Use audio-aware chunking
-            text_chunks = chunk_text_for_audio(text, max_chars=max_chars_per_chunk,
-                                             target_duration_seconds=target_duration)
-        else:
-            text_chunks = [text]
-
-        if not text_chunks:
-            return {"error": "Text is empty after normalization"}
-
-        audio_chunks: list[torch.Tensor] = []
-        for idx, chunk in enumerate(text_chunks):
-            # Use deterministic seed progression for better continuity
-            chunk_seed = seed + (idx * 1000)  # Larger spacing for more variation
-            audio_chunk, _ = sample_pipeline(
-                model=model,
-                fish_ae=fish_ae,
-                pca_state=pca_state,
-                sample_fn=sample_fn,
-                text_prompt=chunk,
-                speaker_audio=speaker_audio,
-                rng_seed=chunk_seed,
-            )
-            audio_chunks.append(audio_chunk)
-
-
-        # Apply audio processing for smoother concatenation
-        if normalize_boundaries and len(audio_chunks) > 1:
-            audio_out = normalize_chunk_boundaries(audio_chunks, sample_rate=44100)
-        elif enable_crossfade and len(audio_chunks) > 1:
-            audio_out = crossfade_chunks(audio_chunks)
-        else:
-            audio_out = torch.cat(audio_chunks, dim=-1)
-
-        # Validate output
         if audio_out is None or len(audio_out) == 0:
             return {"error": "No audio generated"}
 
-        # Duration is calculated from original audio (sample rate doesn't affect duration)
-        duration_seconds = len(audio_out[0]) / 44_100
+        # Duration calculation
+        duration_seconds = len(audio_out[0]) / sample_rate
         session_id = job_input.get("session_id") or str(uuid4())
 
-        # Save and upload (will be resampled to 24kHz Opus internally)
-        upload_meta = _save_and_upload_audio(audio_out[0].cpu(), 44_100, session_id)
+        # Encode to Opus and upload to S3
+        audio_bytes = encode_to_opus(audio_out[0].cpu(), sample_rate)
+        filename = f"{session_id}.ogg"
+        s3_url = upload_to_s3(audio_bytes, filename)
 
-        result = {
+        return {
             "status": "completed",
-            "filename": upload_meta["filename"],
-            "url": upload_meta["url"],
-            "s3_key": upload_meta["key"],
+            "filename": filename,
+            "url": s3_url,
+            "s3_key": filename,
             "metadata": {
-                "sample_rate": 24_000,  # Output is resampled to 24kHz
+                "sample_rate": 24000,  # Opus output is resampled to 24kHz
                 "codec": "opus",
                 "bitrate": "128k",
                 "duration": duration_seconds,
-                "seed": seed,
+                "seed": parameters.get("seed", 0),
                 "device": config.device,
             },
         }
-        return result
 
     except Exception as e:
         error_trace = traceback.format_exc()
+        log.error(f"Batch mode failed: {str(e)}")
+        log.error(f"Traceback: {error_trace}")
         return {
             "error": str(e),
             "error_type": type(e).__name__,
@@ -1102,82 +412,103 @@ def _synthesize(job_input: Dict, job_id: Optional[str] = None) -> Dict:
         }
 
 
-def handler(job: Dict) -> Any:
+def handler_stream(job_input: Dict) -> Generator[Dict, None, None]:
     """
-    Main handler for RunPod Serverless.
+    Streaming mode handler - yields audio chunks as they're generated.
 
-    Supports both streaming and batch modes.
+    Args:
+        job_input: Job input dictionary
+
+    Yields:
+        Dictionaries with streaming chunk data
+    """
+    # Extract and validate parameters
+    params, error = extract_and_validate_params(job_input)
+    if error:
+        yield error
+        return
+
+    text = params["text"]
+    speaker_voice = params["speaker_voice"]
+    output_format = params["output_format"]
+    parameters = params["parameters"]
+
+    try:
+        # Get inference engine
+        inference_engine = get_inference_engine()
+
+        if output_format == 'pcm_16':
+            # Stream decoded audio chunks
+            log.info(f"Starting decoded audio stream (pcm_16)")
+            yield from inference_engine.generate_audio_stream_decoded(
+                text=text,
+                speaker_voice=speaker_voice,
+                parameters=parameters,
+            )
+        else:
+            # Stream LinaCodec tokens
+            log.info(f"Starting LinaCodec token stream")
+            yield from inference_engine.generate_linacodec_token_stream(
+                text=text,
+                speaker_voice=speaker_voice,
+                parameters=parameters,
+            )
+
+    except Exception as e:
+        error_trace = traceback.format_exc()
+        log.error(f"Streaming mode failed: {str(e)}")
+        log.error(f"Traceback: {error_trace}")
+        yield {
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": error_trace
+        }
+
+
+def handler(job: Dict):
+    """
+    Main RunPod serverless handler.
+
+    Routes to batch or streaming mode based on input parameters.
+
+    Args:
+        job: RunPod job dictionary with 'input' key
+
+    Yields:
+        Result dictionary(es)
     """
     job_id = job.get('id')
     input_data = job.get('input', {})
 
-    # Extract parameters
-    text = input_data.get('text', '')
-    stream = input_data.get('stream', False)
-    output_format = input_data.get('output_format', 'linacodec_tokens')
-
-    log.debug(f"[Tier 3][{job_id}] Handler called: stream={stream}, format={output_format}")
+    log.debug(f"[{job_id}] Handler called")
 
     # Handle health check
     if input_data.get("action") == "health_check":
-        yield health_check(request_id=job_id)
+        yield health_check()
         return
 
-    # Validate input
-    if not text:
-        yield {'error': 'No text provided', 'status': 'error'}
+    # Extract streaming parameters first
+    stream = input_data.get('stream', False)
+    output_format = input_data.get('output_format', 'linacodec_tokens')
+
+    # For streaming mode, use generator
+    if stream:
+        log.info(f"[{job_id}] Streaming mode: format={output_format}")
+        yield from handler_stream(input_data)
         return
 
-    try:
-        # Load models
-        model, fish_ae, pca_state = _load_models(request_id=job_id)
-        
-        # Routing based on mode
-        if stream:
-            parameters = input_data.get("parameters", {})
-            seed = parameters.get("seed", input_data.get("seed", 0))
-            max_chars_per_chunk = int(parameters.get("max_chars_per_chunk", 300))
-            sample_fn = _build_sample_fn(parameters, request_id=job_id)
-            
-            # Optional speaker conditioning
-            speaker_audio = None
-            speaker_voice_name = input_data.get("speaker_voice")
-            if speaker_voice_name:
-                candidate_path = (config.AUDIO_VOICES_DIR / speaker_voice_name).resolve()
-                if not str(candidate_path).startswith(str(config.AUDIO_VOICES_DIR.resolve())):
-                    yield {"error": "Invalid speaker_voice path"}
-                    return
-                if not candidate_path.exists():
-                    yield {"error": f"speaker_voice '{speaker_voice_name}' not found"}
-                    return
-                speaker_audio = load_audio(str(candidate_path)).to(model.device)
+    # For batch mode, yield result (handler must be generator for RunPod compatibility)
+    log.info(f"[{job_id}] Batch mode")
+    result = handler_batch(input_data)
+    yield result
 
-            if output_format == 'pcm_16':
-                # Stream decoded audio chunks (for Cloudflare Workers)
-                log.info(f"[Tier 3][{job_id}] Starting decoded audio stream (pcm_16)")
-                yield from generate_audio_stream_decoded(
-                    text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-                )
-            else:
-                # Stream LinaCodec tokens (for local middleware)
-                log.info(f"[Tier 3][{job_id}] Starting LinaCodec token stream")
-                yield from generate_linacodec_token_stream(
-                    text, model, fish_ae, pca_state, sample_fn, speaker_audio, seed, max_chars_per_chunk
-                )
-        else:
-            # Batch mode
-            log.info(f"[Tier 3][{job_id}] Batch mode synthesis")
-            yield _synthesize(input_data, job_id)
 
-    except Exception as e:
-        error_trace = traceback.format_exc()
-        log.error(f"Handler failed: {str(e)}")
-        log.error(f"Traceback: {error_trace}")
-        yield {"error": str(e), "error_type": type(e).__name__, "traceback": error_trace}
-
+# =============================================================================
+# MAIN ENTRY POINT
+# =============================================================================
 
 def main() -> None:
-    """Simplified main entry point following Lotus pattern"""
+    """Main entry point for RunPod serverless worker."""
     parser = argparse.ArgumentParser(description="RunPod handler for Echo-TTS")
     parser.add_argument("--warmup", action="store_true", help="Load models to warm cache; exits after.")
     args, _ = parser.parse_known_args()
@@ -1191,7 +522,6 @@ def main() -> None:
     if args.warmup:
         print("=== Starting Model Warmup ===")
         try:
-            # Validate configuration before warming up
             if not config.validate():
                 print("ERROR: Configuration validation failed")
                 for error in config.validation_errors:
@@ -1199,9 +529,9 @@ def main() -> None:
                 sys.exit(1)
 
             print("Loading models...")
-            model, fish_ae, pca_state = _load_models()
+            inference_engine = get_inference_engine()
+            inference_engine._load_core_models()
             print("Warmup completed successfully")
-            print(f"Models loaded: {list(_MODELS.keys())}")
         except Exception as e:
             print(f"Warmup failed: {str(e)}")
             traceback.print_exc()
@@ -1215,7 +545,7 @@ def main() -> None:
             print(f"  - {error}")
         print("Starting anyway...")
 
-    # Start the RunPod serverless worker (simple like Lotus)
+    # Start the RunPod serverless worker
     print("Starting RunPod serverless worker...")
     print("Handler ready to receive requests")
     runpod.serverless.start({"handler": handler})
