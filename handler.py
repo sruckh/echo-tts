@@ -401,15 +401,26 @@ def handler_batch(job_input: Dict) -> Dict:
             parameters=parameters,
         )
 
-        if audio_out is None or len(audio_out) == 0:
+        if audio_out is None:
             return {"error": "No audio generated"}
 
+        # Handle tensor shape - could be 1D (samples,) or 2D (1, samples)
+        if audio_out.dim() == 1:
+            audio_tensor = audio_out
+        else:
+            audio_tensor = audio_out[0] if audio_out.dim() > 1 else audio_out
+
+        if len(audio_tensor) == 0:
+            return {"error": "No audio generated (empty tensor)"}
+
         # Duration calculation
-        duration_seconds = len(audio_out[0]) / sample_rate
+        duration_seconds = len(audio_tensor) / sample_rate
         session_id = job_input.get("session_id") or str(uuid4())
 
-        # Encode to Opus and upload to S3
-        audio_bytes = encode_to_opus(audio_out[0].cpu(), sample_rate)
+        # Encode to Opus and upload to S3 - ensure 2D for torchaudio
+        if audio_tensor.dim() == 1:
+            audio_tensor = audio_tensor.unsqueeze(0)
+        audio_bytes = encode_to_opus(audio_tensor.cpu(), sample_rate)
         filename = f"{session_id}.ogg"
         s3_url = upload_to_s3(audio_bytes, filename)
 
