@@ -1,0 +1,124 @@
+%% Echo-TTS Data Flow Diagram
+%% Scope: /opt/docker/echo-tts
+%% Date: 2026-02-01
+
+flowchart TB
+    subgraph client["Client"]
+        req["RunPod API Request"]
+        resp["Response / Stream"]
+    end
+
+    subgraph runpod["RunPod Serverless"]
+        handler["handler.py"]
+
+        subgraph validation["Parameter Validation"]
+            validate["extract_and_validate_params"]
+        end
+
+        subgraph routing["Request Routing"]
+            batch["handler_batch"]
+            stream["handler_stream"]
+        end
+    end
+
+    subgraph engine["Inference Engine"]
+        serverless_eng["serverless_engine.py"]
+
+        subgraph text_proc["Text Processing"]
+            chunker["chunk_text_for_audio"]
+            crossfade["crossfade_chunks"]
+            normalize["normalize_chunk_boundaries"]
+        end
+
+        subgraph models["Model Loading"]
+            load_core["_load_core_models"]
+            load_lina["_load_linacodec"]
+        end
+
+        subgraph generation["Speech Generation"]
+            gen_speech["generate_speech"]
+            gen_stream_decoded["generate_audio_stream_decoded"]
+            gen_lina_tokens["generate_linacodec_token_stream"]
+        end
+    end
+
+    subgraph upstream["Upstream Echo-TTS"]
+        inference["inference.py"]
+        sample_pipe["sample_pipeline"]
+        fish_ae["Fish Audio Autoencoder"]
+        echodit["EchoDiT Model"]
+        pca["PCA State"]
+    end
+
+    subgraph linacodec["LinaCodec"]
+        lina_encode["encode"]
+        lina_decode["decode"]
+    end
+
+    subgraph storage["Storage"]
+        hf["HuggingFace Hub"]
+        s3["S3 Bucket"]
+        voices["Audio Voices Dir"]
+        volume["RunPod Volume"]
+    end
+
+    subgraph config_mod["Configuration"]
+        config["config.py"]
+        env["Environment Variables"]
+    end
+
+    %% Client flow
+    req --> handler
+    handler --> resp
+
+    %% Handler routing
+    handler --> validate
+    validate --> batch
+    validate --> stream
+
+    %% Batch mode flow
+    batch --> serverless_eng
+    batch --> |"Opus encode"| s3
+
+    %% Stream mode flow
+    stream --> serverless_eng
+
+    %% Engine processing
+    serverless_eng --> chunker
+    chunker --> gen_speech
+    serverless_eng --> gen_stream_decoded
+    serverless_eng --> gen_lina_tokens
+
+    %% Model loading
+    load_core --> hf
+    load_lina --> hf
+    gen_speech --> load_core
+    gen_stream_decoded --> load_lina
+    gen_lina_tokens --> load_lina
+
+    %% Generation pipeline
+    gen_speech --> sample_pipe
+    sample_pipe --> echodit
+    sample_pipe --> fish_ae
+    sample_pipe --> pca
+
+    %% Audio chunk processing
+    gen_speech --> crossfade
+    gen_speech --> normalize
+
+    %% LinaCodec encoding
+    gen_stream_decoded --> lina_encode
+    gen_stream_decoded --> lina_decode
+    gen_lina_tokens --> lina_encode
+
+    %% Speaker reference
+    voices --> gen_speech
+
+    %% Configuration
+    env --> config
+    config --> handler
+    config --> serverless_eng
+
+    %% Caching
+    volume --> load_core
+    volume --> load_lina

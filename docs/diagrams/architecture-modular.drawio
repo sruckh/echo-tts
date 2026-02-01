@@ -1,0 +1,151 @@
+<mxGraphModel>
+  <root>
+    <mxCell id="0"/>
+    <mxCell id="1" parent="0"/>
+    
+    <!-- Title -->
+    <mxCell id="title" value="Echo-TTS RunPod Serverless Architecture" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;rounded=0;fontSize=18;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="200" y="10" width="400" height="30" as="geometry"/>
+    </mxCell>
+    
+    <!-- Client Layer -->
+    <mxCell id="client-box" value="Client" style="swimlane;horizontal=1;startSize=25;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="40" y="50" width="120" height="80" as="geometry"/>
+    </mxCell>
+    <mxCell id="client" value="RunPod API&#xa;Request" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="client-box">
+      <mxGeometry x="10" y="35" width="100" height="35" as="geometry"/>
+    </mxCell>
+    
+    <!-- Handler Layer -->
+    <mxCell id="handler-box" value="Handler Layer (handler.py)" style="swimlane;horizontal=1;startSize=25;fillColor=#fff2cc;strokeColor=#d6b656;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="180" y="50" width="240" height="120" as="geometry"/>
+    </mxCell>
+    <mxCell id="handler" value="handler()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="handler-box">
+      <mxGeometry x="80" y="30" width="80" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="batch" value="handler_batch()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="handler-box">
+      <mxGeometry x="10" y="75" width="100" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="stream" value="handler_stream()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="handler-box">
+      <mxGeometry x="130" y="75" width="100" height="30" as="geometry"/>
+    </mxCell>
+    
+    <!-- Config -->
+    <mxCell id="config-box" value="Configuration (config.py)" style="swimlane;horizontal=1;startSize=25;fillColor=#e1d5e7;strokeColor=#9673a6;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="440" y="50" width="150" height="120" as="geometry"/>
+    </mxCell>
+    <mxCell id="config" value="Config Class" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="config-box">
+      <mxGeometry x="25" y="35" width="100" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="env" value="Environment&#xa;Variables" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="config-box">
+      <mxGeometry x="25" y="75" width="100" height="35" as="geometry"/>
+    </mxCell>
+    
+    <!-- Inference Engine Layer -->
+    <mxCell id="engine-box" value="Inference Engine (serverless_engine.py)" style="swimlane;horizontal=1;startSize=25;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="40" y="190" width="350" height="150" as="geometry"/>
+    </mxCell>
+    <mxCell id="engine" value="EchoTTSInference" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontStyle=1;" vertex="1" parent="engine-box">
+      <mxGeometry x="120" y="30" width="120" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="gen-speech" value="generate_speech()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="engine-box">
+      <mxGeometry x="10" y="70" width="100" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="gen-stream" value="generate_audio&#xa;_stream_decoded()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="engine-box">
+      <mxGeometry x="125" y="70" width="110" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="gen-tokens" value="generate_linacodec&#xa;_token_stream()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="engine-box">
+      <mxGeometry x="245" y="70" width="95" height="35" as="geometry"/>
+    </mxCell>
+    <mxCell id="chunking" value="Text Chunking + Crossfade" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="engine-box">
+      <mxGeometry x="70" y="115" width="150" height="25" as="geometry"/>
+    </mxCell>
+    
+    <!-- LinaCodec -->
+    <mxCell id="lina-box" value="LinaCodec" style="swimlane;horizontal=1;startSize=25;fillColor=#f8cecc;strokeColor=#b85450;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="410" y="190" width="120" height="90" as="geometry"/>
+    </mxCell>
+    <mxCell id="lina-enc" value="encode()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lina-box">
+      <mxGeometry x="10" y="30" width="100" height="25" as="geometry"/>
+    </mxCell>
+    <mxCell id="lina-dec" value="decode()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="lina-box">
+      <mxGeometry x="10" y="60" width="100" height="25" as="geometry"/>
+    </mxCell>
+    
+    <!-- Upstream Echo-TTS -->
+    <mxCell id="upstream-box" value="Upstream Echo-TTS (inference.py)" style="swimlane;horizontal=1;startSize=25;fillColor=#ffe6cc;strokeColor=#d79b00;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="40" y="360" width="350" height="120" as="geometry"/>
+    </mxCell>
+    <mxCell id="sample-pipe" value="sample_pipeline()" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="upstream-box">
+      <mxGeometry x="125" y="30" width="100" height="30" as="geometry"/>
+    </mxCell>
+    <mxCell id="echodit" value="EchoDiT Model&#xa;(24-layer DiT)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="upstream-box">
+      <mxGeometry x="10" y="70" width="100" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="fish-ae" value="Fish Audio&#xa;Autoencoder" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="upstream-box">
+      <mxGeometry x="125" y="70" width="100" height="40" as="geometry"/>
+    </mxCell>
+    <mxCell id="pca" value="PCA State" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;" vertex="1" parent="upstream-box">
+      <mxGeometry x="240" y="70" width="100" height="40" as="geometry"/>
+    </mxCell>
+    
+    <!-- Storage Layer -->
+    <mxCell id="storage-box" value="Storage" style="swimlane;horizontal=1;startSize=25;fillColor=#f5f5f5;strokeColor=#666666;fontStyle=1;" vertex="1" parent="1">
+      <mxGeometry x="410" y="300" width="180" height="180" as="geometry"/>
+    </mxCell>
+    <mxCell id="hf" value="HuggingFace Hub" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="storage-box">
+      <mxGeometry x="10" y="30" width="75" height="45" as="geometry"/>
+    </mxCell>
+    <mxCell id="s3" value="S3 Bucket" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="storage-box">
+      <mxGeometry x="95" y="30" width="75" height="45" as="geometry"/>
+    </mxCell>
+    <mxCell id="voices" value="Audio Voices" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#e1d5e7;strokeColor=#9673a6;" vertex="1" parent="storage-box">
+      <mxGeometry x="10" y="85" width="75" height="45" as="geometry"/>
+    </mxCell>
+    <mxCell id="volume" value="RunPod&#xa;Volume" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="storage-box">
+      <mxGeometry x="95" y="85" width="75" height="45" as="geometry"/>
+    </mxCell>
+    <mxCell id="cache" value="Model Cache" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;" vertex="1" parent="storage-box">
+      <mxGeometry x="40" y="140" width="100" height="30" as="geometry"/>
+    </mxCell>
+    
+    <!-- Arrows -->
+    <mxCell id="arr1" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="client" target="handler">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr2" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="handler" target="batch">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="handler" target="stream">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="batch" target="engine">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="stream" target="engine">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;dashed=1;" edge="1" parent="1" source="config" target="handler-box">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr7" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="gen-speech" target="sample-pipe">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr8" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="gen-stream" target="lina-enc">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr9" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="gen-tokens" target="lina-enc">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr10" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="sample-pipe" target="echodit">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr11" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="sample-pipe" target="fish-ae">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    <mxCell id="arr12" style="edgeStyle=orthogonalEdgeStyle;rounded=0;orthogonalLoop=1;jettySize=auto;html=1;endArrow=classic;endFill=1;" edge="1" parent="1" source="sample-pipe" target="pca">
+      <mxGeometry relative="1" as="geometry"/>
+    </mxCell>
+    
+  </root>
+</mxGraphModel>

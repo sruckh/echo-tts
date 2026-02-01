@@ -25,9 +25,26 @@ Core model/inference code is vendored from the upstream Echo-TTS repository at i
 
 ## 🏗️ Architecture
 
+### System Architecture
+
 ![Architecture Diagram](./docs/diagrams/architecture.svg)
 
-The Echo-TTS architecture consists of three main modalities processed by a Diffusion Transformer:
+### Data Flow
+
+![Data Flow Diagram](./docs/diagrams/data-flow.svg)
+
+The RunPod serverless worker follows a modular architecture pattern:
+
+| Module | Purpose |
+|--------|---------|
+| `handler.py` | Thin routing layer - validates requests, routes to batch/streaming modes |
+| `config.py` | Centralized configuration - environment variables, validation, constants |
+| `serverless_engine.py` | Inference wrapper - model loading, generation methods, LinaCodec encoding |
+| `inference.py` | Upstream Echo-TTS - sample_pipeline, model orchestration |
+
+### Model Architecture
+
+The Echo-TTS model consists of three main modalities processed by a Diffusion Transformer:
 
 1. **Text Encoder**: Processes tokenized text with 14-layer transformer (1280-dim)
 2. **Speaker Encoder**: Encodes reference audio into patches using 14-layer transformer
@@ -82,6 +99,36 @@ curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
       }
     }
   }'
+```
+
+### Streaming Modes
+
+The serverless handler supports two streaming output formats via the `stream` and `output_format` parameters:
+
+| Format | Description | Use Case |
+|--------|-------------|----------|
+| `linacodec_tokens` | LinaCodec-encoded tokens + embeddings | Low-latency middleware decoding |
+| `pcm_16` | 16-bit PCM audio at 48kHz | Direct playback, Cloudflare Workers |
+
+**Streaming request example:**
+```bash
+curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/run" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${RUNPOD_API_KEY}" \
+  -d '{
+    "input": {
+      "text": "Hello, this is streaming audio.",
+      "stream": true,
+      "output_format": "pcm_16"
+    }
+  }'
+```
+
+**Streaming response format:**
+```json
+{"status": "streaming", "chunk": 1, "format": "pcm_16", "audio_chunk": "<base64>", "sample_rate": 48000}
+{"status": "streaming", "chunk": 2, "format": "pcm_16", "audio_chunk": "<base64>", "sample_rate": 48000}
+{"status": "complete", "total_chunks": 2, "elapsed_time_seconds": 3.5}
 ```
 
 ### Blockwise Generation
