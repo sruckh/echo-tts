@@ -588,7 +588,10 @@ def main() -> None:
     # Start the RunPod serverless worker
     print("Starting RunPod serverless worker...")
     print("Handler ready to receive requests")
-    runpod.serverless.start({"handler": handler})
+    runpod.serverless.start({
+        "handler": handler,
+        "return_aggregate_stream": True,  # Collect generator yields into output array
+    })
 
 
 if __name__ == "__main__":
