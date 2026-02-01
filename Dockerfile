@@ -30,6 +30,8 @@ RUN git clone "$ECHO_TTS_UPSTREAM_REPO" /opt/echo-tts-remote \
 
 # Copy serverless handler + bootstrap into image
 COPY handler.py /opt/echo-tts-remote/handler.py
+COPY config.py /opt/echo-tts-remote/config.py
+COPY serverless_engine.py /opt/echo-tts-remote/serverless_engine.py
 COPY bootstrap.sh /opt/bootstrap.sh
 
 CMD ["bash", "/opt/bootstrap.sh"]
