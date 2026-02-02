@@ -397,13 +397,17 @@ class EchoTTSInference:
         # Stream tuning knobs
         stream_chunk_seconds = parameters.get("stream_chunk_seconds")
         stream_crossfade_ms = parameters.get("stream_crossfade_ms", parameters.get("crossfade_ms", config.DEFAULT_CROSSFADE_MS))
-        stream_tail_ms = parameters.get("stream_tail_ms", 250)
+        stream_tail_ms = parameters.get("stream_tail_ms", 0)
         stream_max_chars = int(parameters.get("stream_max_chars_per_chunk", parameters.get("max_chars_per_chunk", config.DEFAULT_MAX_CHARS_PER_CHUNK)))
+        enable_crossfade = parameters.get("enable_crossfade", True)
 
         try:
-            # If no streaming chunk size is provided, default to a modest chunk for UX
+            # If no streaming chunk size is provided, default to batch-tuned duration
             if stream_chunk_seconds is None:
-                stream_chunk_seconds = 1.5
+                stream_chunk_seconds = parameters.get(
+                    "target_duration_seconds",
+                    config.DEFAULT_TARGET_DURATION_SECONDS,
+                )
 
             # Build the same core pieces as batch for quality consistency
             model, fish_ae, pca_state = self._load_core_models()
@@ -425,7 +429,11 @@ class EchoTTSInference:
             sample_rate = 44100
 
             tail_samples = int(sample_rate * (float(stream_tail_ms) / 1000.0)) if stream_tail_ms else 0
-            crossfade_samples = int(sample_rate * (float(stream_crossfade_ms) / 1000.0)) if stream_crossfade_ms else 0
+            crossfade_samples = (
+                int(sample_rate * (float(stream_crossfade_ms) / 1000.0))
+                if stream_crossfade_ms and enable_crossfade
+                else 0
+            )
 
             buffer_audio = None
             chunk_num = 0
