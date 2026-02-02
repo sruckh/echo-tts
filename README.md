@@ -77,7 +77,7 @@ For low VRAM tuning in upstream demos, refer to upstream Echo-TTS documentation.
 The serverless handler includes enhanced chunking to reduce audio artifacts:
 
 **Features:**
-- **Audio-aware chunking**: Splits text based on both character count and estimated audio duration (~12 chars/second)
+- **Audio-aware chunking**: Splits text based on both character count and estimated audio duration (~2.5 chars/second)
 - **Cross-fading**: Overlaps adjacent chunks with smooth transitions (100ms default) to eliminate clicks and pops
 - **Boundary normalization**: Ensures consistent silence between chunks and removes excessive trailing silence
 - **Deterministic seeding**: Uses spaced seeds for better audio continuity between chunks
@@ -91,10 +91,10 @@ curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
     "input": {
       "text": "This is a long text that will be split into multiple chunks and processed with cross-fading to ensure smooth audio transitions between segments.",
       "parameters": {
-        "max_chars_per_chunk": 300,
+        "max_chars_per_chunk": 350,
         "enable_crossfade": true,
         "normalize_boundaries": true,
-        "target_duration_seconds": 10.0,
+        "target_duration_seconds": 150.0,
         "seed": 1234
       }
     }
@@ -108,7 +108,7 @@ The serverless handler supports two streaming output formats via the `stream` an
 | Format | Description | Use Case |
 |--------|-------------|----------|
 | `linacodec_tokens` | LinaCodec-encoded tokens + embeddings | Low-latency middleware decoding |
-| `pcm_16` | 16-bit PCM audio at 48kHz | Direct playback, Cloudflare Workers |
+| `pcm_16` | 16-bit PCM audio at 44.1kHz | Direct playback, Cloudflare Workers |
 
 **Streaming request example:**
 ```bash
@@ -126,8 +126,8 @@ curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/run" \
 
 **Streaming response format:**
 ```json
-{"status": "streaming", "chunk": 1, "format": "pcm_16", "audio_chunk": "<base64>", "sample_rate": 48000}
-{"status": "streaming", "chunk": 2, "format": "pcm_16", "audio_chunk": "<base64>", "sample_rate": 48000}
+{"status": "streaming", "chunk": 1, "format": "pcm_16", "audio_chunk": "<base64>", "sample_rate": 44100}
+{"status": "streaming", "chunk": 2, "format": "pcm_16", "audio_chunk": "<base64>", "sample_rate": 44100}
 {"status": "complete", "total_chunks": 2, "elapsed_time_seconds": 3.5}
 ```
 
@@ -231,10 +231,10 @@ The serverless worker runs `handler.py`. Reference voices come from filenames (n
 - `text` (str): text to synthesize.
 - `speaker_voice` (str, optional): filename in `AUDIO_VOICES_DIR`.
 - `parameters` (dict, optional): sampler config (num_steps, cfg_scale_text/speaker, cfg_min_t/cfg_max_t, truncation_factor, rescale_k, rescale_sigma, speaker_kv_scale, speaker_kv_max_layers, speaker_kv_min_t, sequence_length, seed, max_chars_per_chunk, enable_crossfade, normalize_boundaries, target_duration_seconds).
-  - `max_chars_per_chunk` (int, default `300`): long prompts are split and synthesized chunk-by-chunk, then concatenated. Set to `0` to disable chunking.
+  - `max_chars_per_chunk` (int, default `350`): long prompts are split and synthesized chunk-by-chunk, then concatenated. Set to `0` to disable chunking.
   - `enable_crossfade` (bool, default `true`): apply cross-fading between audio chunks for smoother transitions (reduces clicks/pops at boundaries).
   - `normalize_boundaries` (bool, default `true`): normalize silences at chunk boundaries to reduce artifacts (adds consistent silence, removes trailing silence).
-  - `target_duration_seconds` (float, default `10.0`): target duration per chunk in seconds when audio-aware chunking is enabled.
+  - `target_duration_seconds` (float, default `150.0`): target duration per chunk in seconds when audio-aware chunking is enabled.
 - `session_id` (str, optional): used for output filename; defaults to UUID.
 
 **Response**
@@ -270,7 +270,11 @@ curl -X POST "https://api.runpod.ai/v2/${ENDPOINT_ID}/runsync" \
       "parameters": {
         "num_steps": 40,
         "cfg_scale_text": 3.0,
-        "cfg_scale_speaker": 8.0,
+        "cfg_scale_speaker": 10.0,
+        "sequence_length": 640,
+        "max_chars_per_chunk": 350,
+        "target_duration_seconds": 150.0,
+        "enable_crossfade": true,
         "seed": 1234
       }
     }
