@@ -390,6 +390,7 @@ class EchoTTSInference:
     ) -> Generator[Dict[str, Any], None, None]:
         """Generate streaming audio with base64 encoded PCM chunks."""
         import base64
+        import traceback
         if parameters is None:
             parameters = {}
 
@@ -449,13 +450,16 @@ class EchoTTSInference:
                 else:
                     chunk_tensor = audio_chunk
 
+                if chunk_tensor.dim() > 1:
+                    chunk_tensor = chunk_tensor.reshape(-1)
+
                 if buffer_audio is None:
                     merged = chunk_tensor
                 else:
                     if crossfade_samples > 0:
                         cf = min(crossfade_samples, len(buffer_audio), len(chunk_tensor))
                         if cf > 0:
-                            fade_out = torch.linspace(1.0, 0.0, cf, device=chunk_tensor.device)
+                            fade_out = torch.linspace(1.0, 0.0, cf, device=chunk_tensor.device, dtype=chunk_tensor.dtype)
                             fade_in = 1.0 - fade_out
                             blended = buffer_audio[-cf:] * fade_out + chunk_tensor[:cf] * fade_in
                             merged = torch.cat([buffer_audio[:-cf], blended, chunk_tensor[cf:]], dim=-1)
