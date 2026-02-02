@@ -1,0 +1,18 @@
+{
+  "description": "Voice mappings for Echo-TTS",
+  "openai_to_echotts": {
+    "alloy": "Elijah",
+    "echo": "Kurt",
+    "fable": "Kim",
+    "onyx": "Scott",
+    "nova": "Dorota",
+    "shimmer": "Kim"
+  },
+  "speakers": {
+    "Dorota": {"description": "Reference voice"},
+    "Elijah": {"description": "Reference voice"},
+    "Kim": {"description": "Reference voice"},
+    "Kurt": {"description": "Reference voice"},
+    "Scott": {"description": "Reference voice"}
+  }
+}

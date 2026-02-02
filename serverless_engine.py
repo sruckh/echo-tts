@@ -144,7 +144,8 @@ def normalize_chunk_boundaries(
     audio_chunks: List[torch.Tensor],
     sample_rate: int = 44100,
     silence_threshold: float = 0.01,
-    min_silence_samples: int = 2400
+    min_silence_samples: int = 2400,
+    crossfade_ms: int = 50
 ) -> torch.Tensor:
     """Normalize silence at chunk boundaries to reduce artifacts."""
     if not audio_chunks:
@@ -181,7 +182,7 @@ def normalize_chunk_boundaries(
 
         normalized_chunks.append(chunk)
 
-    return crossfade_chunks(normalized_chunks, sample_rate=sample_rate)
+    return crossfade_chunks(normalized_chunks, crossfade_ms=crossfade_ms, sample_rate=sample_rate)
 
 
 # =============================================================================
@@ -306,6 +307,7 @@ class EchoTTSInference:
         max_chars_per_chunk = int(parameters.get("max_chars_per_chunk", config.DEFAULT_MAX_CHARS_PER_CHUNK))
         enable_crossfade = parameters.get("enable_crossfade", True)
         normalize_boundaries = parameters.get("normalize_boundaries", True)
+        crossfade_ms = int(parameters.get("crossfade_ms", config.DEFAULT_CROSSFADE_MS))
         target_duration = parameters.get("target_duration_seconds", config.DEFAULT_TARGET_DURATION_SECONDS)
 
         if max_chars_per_chunk and max_chars_per_chunk > 0:
@@ -334,9 +336,13 @@ class EchoTTSInference:
             audio_chunks.append(audio_chunk)
 
         if normalize_boundaries and len(audio_chunks) > 1:
-            audio_out = normalize_chunk_boundaries(audio_chunks, sample_rate=44100)
+            audio_out = normalize_chunk_boundaries(
+                audio_chunks,
+                sample_rate=44100,
+                crossfade_ms=crossfade_ms
+            )
         elif enable_crossfade and len(audio_chunks) > 1:
-            audio_out = crossfade_chunks(audio_chunks)
+            audio_out = crossfade_chunks(audio_chunks, crossfade_ms=crossfade_ms)
         else:
             audio_out = torch.cat(audio_chunks, dim=-1)
 

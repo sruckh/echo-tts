@@ -47,11 +47,11 @@ OUTPUT_AUDIO_DIR = Path(os.environ.get("OUTPUT_AUDIO_DIR", f"{ECHO_TTS_DIR}/outp
 AUDIO_EXTS = {".wav", ".mp3", ".m4a", ".ogg", ".flac", ".webm", ".aac", ".opus"}
 
 # Chunking defaults
-DEFAULT_MAX_CHARS_PER_CHUNK = 300
-DEFAULT_TARGET_DURATION_SECONDS = 10.0
+DEFAULT_MAX_CHARS_PER_CHUNK = 350
+DEFAULT_TARGET_DURATION_SECONDS = 150.0
 
 # Crossfade settings for chunk transitions
-DEFAULT_CROSSFADE_MS = 50
+DEFAULT_CROSSFADE_MS = 100
 DEFAULT_SILENCE_THRESHOLD = 0.01
 DEFAULT_MIN_SILENCE_SAMPLES = 2400  # ~50ms at 48kHz
 
@@ -78,9 +78,9 @@ except ImportError:
 # Generation Parameter Defaults
 # =============================================================================
 
-DEFAULT_NUM_STEPS = 40
-DEFAULT_CFG_SCALE_TEXT = 3.0
-DEFAULT_CFG_SCALE_SPEAKER = 8.0
+DEFAULT_NUM_STEPS = 32
+DEFAULT_CFG_SCALE_TEXT = 2.5
+DEFAULT_CFG_SCALE_SPEAKER = 10.0
 DEFAULT_CFG_MIN_T = 0.5
 DEFAULT_CFG_MAX_T = 1.0
 DEFAULT_SEQUENCE_LENGTH = 640

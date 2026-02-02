@@ -1,0 +1,23 @@
+name = "echotts-openai-bridge"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Environment variables (set via `npx wrangler secret put <NAME>`)
+# RunPod configuration
+# RUNPOD_URL = "https://api.runpod.ai/v2/some-id"
+# RUNPOD_API_KEY = "runpod-api-key"
+# Optional: Authentication
+# API_KEY = "your-optional-api-key"
+# Optional: Voice mapping JSON
+# VOICE_MAP = "{\"alloy\": \"Dorota\"}"
+# Optional: Default voice
+# DEFAULT_VOICE = "Dorota"
+
+[vars]
+ENVIRONMENT = "production"
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
