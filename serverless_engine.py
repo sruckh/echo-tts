@@ -388,79 +388,140 @@ class EchoTTSInference:
         speaker_voice: str = None,
         parameters: Dict = None,
     ) -> Generator[Dict[str, Any], None, None]:
-        """Generate streaming audio with base64 encoded chunks."""
+        """Generate streaming audio with base64 encoded PCM chunks."""
         import base64
         if parameters is None:
             parameters = {}
 
-        max_chars_per_chunk = int(parameters.get("max_chars_per_chunk", config.DEFAULT_MAX_CHARS_PER_CHUNK))
+        # Stream tuning knobs
+        stream_chunk_seconds = parameters.get("stream_chunk_seconds")
+        stream_crossfade_ms = parameters.get("stream_crossfade_ms", parameters.get("crossfade_ms", config.DEFAULT_CROSSFADE_MS))
+        stream_tail_ms = parameters.get("stream_tail_ms", 250)
+        stream_max_chars = int(parameters.get("stream_max_chars_per_chunk", parameters.get("max_chars_per_chunk", config.DEFAULT_MAX_CHARS_PER_CHUNK)))
 
-        if not LINACODEC_AVAILABLE:
-            log.warning("LinaCodec not available, streaming raw audio")
-            audio_out, sr = self.generate_speech(text, speaker_voice, parameters)
-            audio_b64 = base64.b64encode(audio_out.cpu().numpy().tobytes()).decode('utf-8')
-            yield {
-                'status': 'streaming',
-                'chunk': 1,
-                'format': 'pcm_44',
-                'audio_chunk': audio_b64,
-                'sample_rate': sr
-            }
+        try:
+            # If no streaming chunk size is provided, default to a modest chunk for UX
+            if stream_chunk_seconds is None:
+                stream_chunk_seconds = 1.5
+
+            # Build the same core pieces as batch for quality consistency
+            model, fish_ae, pca_state = self._load_core_models()
+            sample_fn = self._build_sample_fn(parameters)
+            speaker_audio = self._load_speaker_audio(speaker_voice) if speaker_voice else None
+
+            # Chunk text for streaming
+            text_chunks = chunk_text_for_audio(
+                text,
+                max_chars=stream_max_chars,
+                target_duration_seconds=float(stream_chunk_seconds),
+            )
+
+            if not text_chunks:
+                yield {"error": "Text is empty after normalization"}
+                return
+
+            seed = parameters.get("seed", 0)
+            sample_rate = 44100
+
+            tail_samples = int(sample_rate * (float(stream_tail_ms) / 1000.0)) if stream_tail_ms else 0
+            crossfade_samples = int(sample_rate * (float(stream_crossfade_ms) / 1000.0)) if stream_crossfade_ms else 0
+
+            buffer_audio = None
+            chunk_num = 0
+
+            for idx, chunk in enumerate(text_chunks):
+                chunk_seed = seed + (idx * 1000)
+                audio_chunk, _ = sample_pipeline(
+                    model=model,
+                    fish_ae=fish_ae,
+                    pca_state=pca_state,
+                    sample_fn=sample_fn,
+                    text_prompt=chunk,
+                    speaker_audio=speaker_audio,
+                    rng_seed=chunk_seed,
+                )
+
+                # Normalize to 1D tensor
+                if audio_chunk.dim() == 1:
+                    chunk_tensor = audio_chunk
+                elif audio_chunk.dim() > 1:
+                    chunk_tensor = audio_chunk[0]
+                else:
+                    chunk_tensor = audio_chunk
+
+                if buffer_audio is None:
+                    merged = chunk_tensor
+                else:
+                    if crossfade_samples > 0:
+                        cf = min(crossfade_samples, len(buffer_audio), len(chunk_tensor))
+                        if cf > 0:
+                            fade_out = torch.linspace(1.0, 0.0, cf, device=chunk_tensor.device)
+                            fade_in = 1.0 - fade_out
+                            blended = buffer_audio[-cf:] * fade_out + chunk_tensor[:cf] * fade_in
+                            merged = torch.cat([buffer_audio[:-cf], blended, chunk_tensor[cf:]], dim=-1)
+                        else:
+                            merged = torch.cat([buffer_audio, chunk_tensor], dim=-1)
+                    else:
+                        merged = torch.cat([buffer_audio, chunk_tensor], dim=-1)
+
+                if tail_samples > 0 and len(merged) > tail_samples:
+                    emit_tensor = merged[:-tail_samples]
+                    buffer_audio = merged[-tail_samples:]
+                else:
+                    emit_tensor = None
+                    buffer_audio = merged
+
+                if emit_tensor is not None and len(emit_tensor) > 0:
+                    audio_array = emit_tensor.detach().cpu().numpy()
+                    if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
+                        audio_int16 = (audio_array * 32767).astype(np.int16)
+                    else:
+                        audio_int16 = audio_array.astype(np.int16)
+
+                    audio_b64 = base64.b64encode(audio_int16.tobytes()).decode('utf-8')
+                    chunk_num += 1
+                    yield {
+                        'status': 'streaming',
+                        'chunk': chunk_num,
+                        'format': 'pcm_16',
+                        'audio_chunk': audio_b64,
+                        'sample_rate': sample_rate,
+                    }
+
+            # Flush remaining buffer
+            if buffer_audio is not None and len(buffer_audio) > 0:
+                audio_array = buffer_audio.detach().cpu().numpy()
+                if audio_array.dtype == np.float32 or audio_array.dtype == np.float64:
+                    audio_int16 = (audio_array * 32767).astype(np.int16)
+                else:
+                    audio_int16 = audio_array.astype(np.int16)
+
+                audio_b64 = base64.b64encode(audio_int16.tobytes()).decode('utf-8')
+                chunk_num += 1
+                yield {
+                    'status': 'streaming',
+                    'chunk': chunk_num,
+                    'format': 'pcm_16',
+                    'audio_chunk': audio_b64,
+                    'sample_rate': sample_rate,
+                }
+
             yield {
                 'status': 'complete',
-                'format': 'pcm_44',
-                'message': 'All chunks streamed (no LinaCodec)'
-            }
-            return
-
-        lina = self._load_linacodec()
-
-        if max_chars_per_chunk and max_chars_per_chunk > 0:
-            text_chunks = chunk_text_for_audio(text, max_chars=max_chars_per_chunk,
-                                             target_duration_seconds=parameters.get("target_duration_seconds", 10.0))
-        else:
-            text_chunks = [text]
-
-        chunk_num = 0
-        start_time = time.time()
-
-        for chunk in text_chunks:
-            chunk_num += 1
-            chunk_start = time.time()
-
-            chunk_params = dict(parameters) if parameters else {}
-            chunk_audio, _ = self.generate_speech(chunk, speaker_voice, chunk_params)
-
-            tokens, embedding = self.encode_to_linacodec(chunk_audio)
-            decoded_audio = lina.decode(tokens, embedding)
-
-            process_time = time.time() - chunk_start
-
-            audio_array = decoded_audio.cpu().numpy() if hasattr(decoded_audio, 'cpu') else decoded_audio
-            audio_int16 = (audio_array * 32767).astype(np.int16)
-            audio_b64 = base64.b64encode(audio_int16.tobytes()).decode('utf-8')
-
-            log.debug(f"Chunk {chunk_num}: {len(audio_array)} samples (process: {process_time:.3f}s)")
-
-            yield {
-                'status': 'streaming',
-                'chunk': chunk_num,
                 'format': 'pcm_16',
-                'audio_chunk': audio_b64,
-                'sample_rate': 48000,
-                'process_time_ms': process_time * 1000
+                'message': 'All chunks streamed',
+                'total_chunks': chunk_num,
             }
 
-        elapsed = time.time() - start_time
-        log.info(f"Stream complete: {chunk_num} chunks, {elapsed:.2f}s")
-
-        yield {
-            'status': 'complete',
-            'format': 'pcm_16',
-            'message': 'All chunks streamed',
-            'total_chunks': chunk_num,
-            'elapsed_time_seconds': elapsed
-        }
+        except Exception as e:
+            error_trace = traceback.format_exc()
+            log.error(f"Streaming mode failed: {str(e)}")
+            log.error(f"Traceback: {error_trace}")
+            yield {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "traceback": error_trace
+            }
 
     def generate_linacodec_token_stream(
         self,
